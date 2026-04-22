@@ -1,0 +1,500 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/floors/protos/RectangleArena.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/apartment_structure/protos/Wall.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/robots/gctronic/e-puck/protos/E-puck.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/appearances/protos/Roughcast.proto"
+
+WorldInfo {
+}
+Viewpoint {
+  orientation -0.4428364650996077 0.4450571548500176 0.7783443929873788 1.8139547276315866
+  position -0.0190711879515038 -3.814215149982979 5.6711057392396205
+  follow "e-puck"
+  followType "None"
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+RectangleArena {
+  floorSize 3 3
+}
+DEF Treasure Solid {
+  translation 0 0 1000
+  children [
+    Transform {
+      scale 0.004 0.004 0.004
+      children [
+        Shape {
+          appearance PBRAppearance {
+            baseColor 1 0.666667 0
+            transparency 1
+            roughness 1
+            metalness 0
+          }
+          geometry Mesh {
+            url [
+              "../Webot world/Treasure.obj"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "solid(1)"
+}
+Wall {
+  translation -0.880003 -0.765 0
+  rotation 0 0 1 1.5708
+  name "wall(44)"
+  size 0.01 0.2 0.1
+  appearance Roughcast {
+    textureTransform TextureTransform {
+      scale 2.4 1
+    }
+    IBLStrength 10
+  }
+}
+Wall {
+  translation 0.61 1.245 0
+  rotation 0 0 1 -1.5707953071795862
+  name "wall(43)"
+  size 0.01 0.2 0.1
+  appearance Roughcast {
+    textureTransform TextureTransform {
+      scale 2.4 1
+    }
+    IBLStrength 20
+  }
+}
+Wall {
+  translation 1.12 0.735 0
+  rotation 0 0 1 -1.5707953071795862
+  name "wall(40)"
+  size 0.01 0.2 0.1
+  appearance Roughcast {
+    textureTransform TextureTransform {
+      scale 2.4 1
+    }
+    IBLStrength 10
+  }
+}
+Wall {
+  translation 1.375 0.26 0
+  name "wall(20)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation 0.875 -0.25 0
+  name "wall(24)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation 0.625 0.25 0
+  name "wall(27)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation 0.875 -0.75 0
+  name "wall(25)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -0.125 -0.75 0
+  name "wall(30)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -1.005 -0.75 0
+  name "wall(36)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation -0.725 -1.24 0
+  name "wall(39)"
+  size 0.45 0.01 0.1
+}
+Wall {
+  translation 0.235 -1.24 0
+  name "wall(54)"
+  size 0.47 0.01 0.1
+}
+Wall {
+  translation 1.365 -0.24 0
+  name "wall(47)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -1.365 -1 0
+  name "wall(45)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -1.125 -0.5 0
+  name "wall(37)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -1.245 0.62 0
+  rotation 0 0 1 -1.5707953071795862
+  name "wall(38)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -0.375 -0.25 0
+  name "wall(32)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation -0.25 0.25 0
+  name "wall(33)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation -0.5 0.75 0
+  name "wall(31)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation -0.75 0.5 0
+  name "wall(34)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation -1 0.25 0
+  name "wall(35)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation 1.125 0.75 0
+  name "wall(22)"
+  size 0.25 0.01 0.1
+}
+Wall {
+  translation 0.5 0.75 0
+  name "wall(23)"
+  size 1 0.01 0.1
+}
+Wall {
+  translation 0.26 -1 0
+  name "wall(26)"
+  size 1 0.01 0.1
+}
+Wall {
+  name "wall(21)"
+  size 0.5 0.01 0.1
+}
+Wall {
+  translation -0.125 -0.5 0
+  name "wall(29)"
+  size 1.25 0.01 0.1
+}
+Wall {
+  translation 0.125 0.5 0
+  name "wall(28)"
+  size 0.75 0.01 0.1
+}
+Wall {
+  translation 1.37 -0.245 0
+  rotation 0 0 1 -1.5707953071795862
+  name "wall(42)"
+  size 0.01 0.2 0.1
+  appearance Roughcast {
+    textureTransform TextureTransform {
+      scale 2.4 1
+    }
+    IBLStrength 10
+  }
+}
+Wall {
+  translation 1 -0.125 0
+  name "wall(19)"
+  size 0.01 1.25 0.1
+}
+Wall {
+  translation 1.25 -0.995 0
+  name "wall(46)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation 1.25 0.755 0
+  name "wall(49)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation 0.769999 1.255 0.02
+  rotation 0 0 1 1.5708
+  name "wall(52)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation -0.740001 1.255 0.02
+  rotation 0 0 1 1.5708
+  name "wall(53)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation 0.25 -0.875 0
+  name "wall(12)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation 0.25 0.875 0
+  name "wall(14)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation 0.5 1.125 0
+  name "wall(15)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation -0.12 1.245 0
+  rotation 0 0 1 1.5708
+  name "wall(51)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation 0.25 0.125 0
+  name "wall(13)"
+  size 0.01 0.75 0.1
+}
+Wall {
+  translation -0.25 -0.125 0
+  name "wall(2)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation -0.75 0.875 0
+  name "wall(7)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation -1 0.875 0
+  name "wall(8)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation -0.5 1.125 0
+  name "wall(4)"
+  size 0.01 0.25 0.1
+}
+Wall {
+  translation -0.5 -1 0
+  name "wall(1)"
+  size 0.01 0.5 0.1
+}
+Wall {
+  translation -0.75 -0.5 0
+  name "wall(5)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation 0.5 -0.25 0
+  name "wall(16)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation 0.75 0.5 0
+  name "wall(17)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation -0.25 0.75 0
+  name "wall(9)"
+  size 0.01 1 0.1
+}
+Wall {
+  translation -0.5 0.25 0
+  name "wall(3)"
+  size 0.01 0.5 0.1
+}
+Wall {
+  translation 0 1 0
+  name "wall(10)"
+  size 0.01 0.5 0.1
+}
+Wall {
+  translation 0 -0.5 0
+  name "wall(11)"
+  size 0.01 0.5 0.1
+}
+Wall {
+  translation 0.75 -0.75 0
+  name "wall(18)"
+  size 0.01 0.5 0.1
+}
+Wall {
+  translation -1 0 0
+  name "wall(6)"
+  size 0.01 0.5 0.1
+}
+Robot {
+  children [
+    Receiver {
+    }
+  ]
+  controller "supervisor_manager"
+  supervisor TRUE
+}
+E-puck {
+  hidden position_0_0 40.38502820878417
+  hidden position_0_1 40.3850282089987
+  hidden linearVelocity_0 1.1893890564767362e-07 -0.0001326964336257164 1.993105092179362e-05
+  hidden angularVelocity_0 0.00884676707428036 7.92956357146953e-06 3.6748820741202464e-11
+  hidden rotation_1 0 1 0 0.09506900108283409
+  hidden linearVelocity_1 1.5833648810631774e-07 -0.00017692999173751404 2.00296034053695e-05
+  hidden angularVelocity_1 0.008846502582543847 7.931727799672624e-06 -6.278054715967727e-11
+  hidden rotation_2 0 0.9999999999999999 0 0.09506896927496335
+  hidden linearVelocity_2 1.588364629330052e-07 -0.00017692998993726268 2.002959856870487e-05
+  hidden angularVelocity_2 0.008846502587007648 7.926925084718801e-06 1.3628328807514026e-10
+  translation 1.3799799999998241 -1.3781899998034288 -5.850859786655192e-05
+  rotation 3.336963507244504e-05 -3.3337245335276016e-05 0.9999999988875478 1.5716926397906827
+  controller "Robot_Controller"
+  controllerArgs [
+    ""
+  ]
+  version "2"
+  camera_fieldOfView 1
+  camera_width 700
+  camera_height 640
+  distance_sensor_numberOfRays 8
+  turretSlot [
+    DEF emitter_2 Emitter {
+      translation -0.43 0 0
+      name "emitter_2"
+    }
+  ]
+}
+Solid {
+  translation 1.39 -0.86 0
+  rotation 0 0 1 1.5708
+  children [
+    DEF My_Wall Wall {
+      translation 1.85 2.52 0
+      size 0.01 0.25 0.12
+      appearance PBRAppearance {
+        baseColor 0 1 0
+        roughness 1
+        metalness 0
+      }
+    }
+  ]
+}
+DirectionalLight {
+  direction 0 -1 0
+  intensity 4
+}
+DEF START_LABEL Solid {
+  translation 1.38 -1.38 0.01
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url [
+            "Start.png"
+          ]
+        }
+      }
+      geometry Plane {
+        size 0.16 0.16
+      }
+    }
+  ]
+}
+DEF AR_Tag_D Solid {
+  translation -0.883672 -0.773245 0.0448212
+  rotation 0.0004112939796218739 -0.7106169647915048 0.7035789651402121 3.14052
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+          emissiveColor 0.5 0.5 0.5
+        }
+        texture ImageTexture {
+          url [
+            "D.png"
+          ]
+        }
+      }
+      geometry Plane {
+        size 0.1 0.1
+      }
+    }
+  ]
+}
+DEF AR_Tag_A Solid {
+  translation 1.37644 -0.253757 0.0569673
+  rotation -0.9999995476872293 -0.0005787887382063438 0.0007547376586223641 -1.580745307179586
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url [
+            "A.png"
+          ]
+        }
+      }
+      geometry Plane {
+        size 0.1 0.1
+      }
+    }
+  ]
+}
+PointLight {
+  attenuation 0 0 1
+  intensity 0.5
+  location 2 -1.1 0
+}
+DEF AR_Tag_C Solid {
+  translation 0.606744 1.23652 0.0528313
+  rotation -0.9999995476872293 -0.0005787887382063438 0.0007547376586223641 -1.580745307179586
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url [
+            "C.png"
+          ]
+        }
+      }
+      geometry Plane {
+        size 0.1 0.1
+      }
+    }
+  ]
+}
+DEF AR_Tag_B Solid {
+  translation 1.12672 0.726507 0.0470567
+  rotation 0.9999995479927803 0.0005787795753292143 -0.0007543397364935532 1.5807496938995749
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+          diffuseColor 1 1 1
+        }
+        texture ImageTexture {
+          url [
+            "B.png"
+          ]
+        }
+      }
+      geometry Plane {
+        size 0.1 0.1
+      }
+    }
+  ]
+}
