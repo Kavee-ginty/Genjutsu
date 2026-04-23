@@ -63,12 +63,7 @@ def send_message(message_string):
     """
     binary_data = message_string.encode('utf-8')
     result = emitter.send(binary_data)
-
-    if result == 1:
-        print(f"E-puck: '{message_string}' sent successfully!")
-        return True
-    else:
-        return False
+    return result == 1
 
 
 # -----------------------------------------------------------------------------
@@ -80,7 +75,6 @@ parameters = cv2.aruco.DetectorParameters()
 detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
 def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.2) -> tuple:
-    print("\n[SCANNER] Initiating 360-degree room scan for ArUco tags...")
     def detect_once() -> tuple:
         cam.enable(timestep_ms)
         robot.step(timestep_ms)
@@ -112,25 +106,19 @@ def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.2) -> t
             front_dist = ranges[center]
             
             if not math.isinf(front_dist) and front_dist < wall_threshold:
-                print(f"[SCANNER] Wall found at {front_dist:.3f}m. Backing up to take photo...")
                 move_distance(-scan_distance)
                 result = detect_once()
                 move_distance(scan_distance)
                 
                 if result[2] is not None: 
-                    print(f"[SCANNER] SUCCESS! Tag {result[2]} found.")
                     for _ in range(turns):
                         turn_left_90(correct=False)
                     lidar.disable()
                     return result
-                else:
-                    print("[SCANNER] Wall is blank. No tag detected.")
 
-        print("[SCANNER] Turning right to check next wall...")
         turn_right_90(correct=False)
         turns += 1
         
-    print("[SCANNER] All 4 sides checked. No tags found.")
     for _ in range(turns):
         turn_left_90(correct=False)
     lidar.disable()
@@ -272,11 +260,9 @@ def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
             center = len(ranges) // 2
             front = ranges[center]
             if math.isinf(front) or front > wall_threshold:
-                print(f"   -> [ADJUST] No wall close enough to adjust to (Dist: {front:.3f}m). Skipping.")
                 lidar.disable()
                 return
     
-    print(f"   -> [ADJUST] Squaring up to wall (Target: {target_distance}m)...")
     max_speed = 1.5  
     min_speed = 0.2
     while True:
@@ -291,7 +277,6 @@ def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
             break
         error = front - target_distance
         if abs(error) <= tolerance:
-            print(f"   -> [ADJUST] Centered successfully. Error is {error:.3f}m.")
             break
         speed = max(min_speed, min(max_speed, abs(error) * 5))
         if error > 0:
@@ -305,29 +290,19 @@ def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
     lidar.disable()
 
 def adjust_to_side_wall(wall_threshold: float = 0.25) -> None:
-    print("\n[DRIFT FIX] Initiating side-wall check to re-center Y-axis...")
-    print("   -> Turning Left 90 deg...")
     turn_left_90(correct=True)
-    
     if check_wall_ahead(threshold=wall_threshold):
-        print("   -> Left wall detected. Adjusting to it.")
         adjust_to_wall()
-        print("   -> Turning Right 90 deg back to forward path.")
         turn_right_90(correct=True)
         return
 
-    print("   -> No Left wall. Turning 180 deg to check Right wall...")
     turn_right_90(correct=True)
     turn_right_90(correct=True)
-    
     if check_wall_ahead(threshold=wall_threshold):
-        print("   -> Right wall detected. Adjusting to it.")
         adjust_to_wall()
-        print("   -> Turning Left 90 deg back to forward path.")
         turn_left_90(correct=True)
         return
         
-    print("   -> Open intersection. No walls on either side. Resuming.")
     turn_left_90(correct=True)
 
 #----------------------------------------------
@@ -338,14 +313,11 @@ def turn_to_heading(target_h: int):
     diff = (target_h - current_heading) % 4
     
     if diff == 1:
-        print("   -> [TURN] Action: Turn Left 90°")
         turn_left_90()
     elif diff == 2:
-        print("   -> [TURN] Action: Turn Left 180°")
         turn_left_90()
         turn_left_90()
     elif diff == 3:
-        print("   -> [TURN] Action: Turn Right 90°")
         turn_right_90()
         
     current_heading = target_h
@@ -364,61 +336,43 @@ def check_wall_ahead(threshold: float = 0.18) -> bool:
         valid_rays = [r for r in front_rays if not math.isinf(r)]
         if valid_rays:
             min_dist = min(valid_rays)
-            print(f"   -> [LiDAR RAW] Closest object in front cone is {min_dist:.3f}m away.")
             if min_dist < threshold:
-                print(f"   -> [LiDAR ALERT] {min_dist:.3f}m is < {threshold}m threshold. WALL CONFIRMED.")
                 return True
-            else:
-                print(f"   -> [LiDAR SAFE] {min_dist:.3f}m means path is clear.")
     return False
 
 def navigate_to_target(target_x, target_y):
     global current_x, current_y, current_heading
     straight_tiles_count = 0
-    print(f"\n========== NEW NAVIGATION GOAL: ({target_x}, {target_y}) ==========")
     
     while (current_x, current_y) != (target_x, target_y):
-        print(f"\n[NAV-LOOP] Pos: ({current_x}, {current_y}) | Heading: {current_heading}")
         path = get_shortest_path_astar((current_x, current_y), (target_x, target_y))
         
         if not path or len(path) < 2:
-            print(f"[FATAL ERROR] A* cannot find a path! Known walls must be completely boxing us in.")
-            print(f"   -> Known walls memory dump: {known_walls}")
             return False
             
-        print(f"   -> [A* CALC] Shortest path looks like: {path}")
         next_node = path[1]
         target_h = get_target_heading((current_x, current_y), next_node)
         
         if target_h != current_heading:
-            print(f"   -> [ACTION] Need to change heading from {current_heading} to {target_h}")
             turn_to_heading(target_h)
             straight_tiles_count = 0 
             
-        print(f"   -> [ACTION] Scanning forward path to {next_node}...")
         if check_wall_ahead():
-            print(f"   -> [OBSTACLE] Unexpected wall detected between {(current_x, current_y)} and {next_node}!")
-            
-            print("   -> [ACTION] Squaring up to this wall to fix drift before recalculating...")
             adjust_to_wall()
-            
             blocked_boundary = get_wall_id((current_x, current_y), next_node)
             known_walls.add(blocked_boundary)
-            print(f"   -> [MAPPING] Wall {blocked_boundary} saved to memory. Restarting loop to replan.")
             straight_tiles_count = 0 
             continue 
             
-        print(f"   -> [ACTION] Path is physically clear. Moving Forward 1 tile to {next_node}.")
         move_forward_tiles(1)
         current_x, current_y = next_node
         straight_tiles_count += 1
         
         if straight_tiles_count >= 4:
-            print(f"   -> [TRIGGER] Moved 4 straight tiles. Activating side-wall drift check.")
             adjust_to_side_wall()
             straight_tiles_count = 0 
             
-    print(f"========== ARRIVED AT GOAL: ({target_x}, {target_y}) ==========\n")
+    print(f"Reached coordinate: ({target_x}, {target_y})")
     return True
 
 # -----------------------------------------------------------------------------
@@ -501,13 +455,10 @@ def main() -> None:
     
     robot.step(timestep_ms) 
     
-    print("========== BOOT SEQUENCE ==========")
-    print("Moving forward to first wall...")
     while(not check_wall_ahead()):
         move_forward_tiles(1)
         current_y += 1 
     
-    print("Initial blind run complete. Squaring up to starting wall...")
     adjust_to_wall()
     
     while robot.step(timestep_ms) != -1:
@@ -515,12 +466,9 @@ def main() -> None:
         x, y, tag_id, binary_str = scan_aruco_tag()
         
         if tag_id is not None:
-            print(f"--- VALID TAG DETECTED ---")
-            print(f"Decimal ID: {tag_id} | Binary: {binary_str}")
-            print(f"Decoded Target Coordinate: X={x}, Y={y}")
+            print(f"Decoded (X, Y) Coordinates: ({x}, {y})")
             
             if x == current_x and y == current_y:
-                print("[SUCCESS] Tag coordinate matches current location. Ending navigation.")
                 break
                 
             success = navigate_to_target(x, y)
@@ -528,12 +476,10 @@ def main() -> None:
                 break 
                 
         else:
-            print("\n[FINISH] No tags found in room. Reached final location.")
             break
             
-    print("\nAttempting to read final wall color...")
     color = detect_final_wall_color()
-    print(f"Final Wall Color Detected: {color}")
+    print(f"Final Wall Color: {color}")
     send_message(color)
 
 
