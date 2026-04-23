@@ -1,36 +1,22 @@
 # Improved version of the e‑puck controller.
-#
-# The goal of this version is to reduce the time spent in tight polling loops
-# and sensor processing without increasing the maximum wheel speed.  Instead of
-# repeatedly querying the GPS at every control step to decide when to stop,
-# this controller computes in advance how many control steps are needed for a
-# given travel distance and only reads the GPS when necessary.  It also
-# disables CPU‑intensive sensors (like the camera and LiDAR) when not in use
-# and allows the caller to adjust sensor update periods, which Webots
-# documentation notes can speed up simulation【280235185990496†L199-L210】.  The
-# overall path remains the same as the original, but the robot should reach
-# its destination sooner because less time is spent in controller overhead.
-
 import math
 import cv2
 import numpy as np
 from controller import Robot
+import collections
+import heapq
 
 # -----------------------------------------------------------------------------
 # 1. INITIALIZATION & CONSTANTS
 # -----------------------------------------------------------------------------
 
-# Create the robot instance and determine the simulation time step.  Webots
-# returns the basic time step in milliseconds; we convert it to seconds for
-# clarity.
 robot = Robot()
 timestep_ms = int(robot.getBasicTimeStep())
 timestep = timestep_ms / 1000.0
 
-tile_length = 0.25  # distance between maze tiles in metres
-wheel_radius = 0.0205  # radius of the e‑puck's wheels (m)
+tile_length = 0.25  
+wheel_radius = 0.0205  
 
-# Sensors and actuators
 emitter = robot.getDevice('emitter_2')
 cam = robot.getDevice('camera')
 gps = robot.getDevice('gps')
@@ -39,38 +25,23 @@ lidar = robot.getDevice('lidar')
 left_motor = robot.getDevice('left wheel motor')
 right_motor = robot.getDevice('right wheel motor')
 
-# Optional position sensors for motors.  These sensors allow us to run
-# movements in position‑control mode: we command a target rotation and
-# monitor the motor positions to know when the motion is complete.  If you
-# decide not to use position control you can ignore these sensors, but
-# enabling them here makes them available for the functions below.
 left_ps = left_motor.getPositionSensor()
 right_ps = right_motor.getPositionSensor()
 left_ps.enable(timestep_ms)
 right_ps.enable(timestep_ms)
 
-# Enable only what is necessary.  By default we disable the camera and LiDAR
-# until we need them.  According to the Webots controller documentation, you
-# can disable a device at any time to reduce computational load and speed up
-# simulation【280235185990496†L199-L210】.  You can re‑enable them later with a
-# larger update period when you need fresh data.
 gps.enable(timestep_ms)
 compass.enable(timestep_ms)
 lidar.enablePointCloud()
-lidar.disable()  # keep LiDAR disabled until we need to adjust to a wall
-cam.disable()    # disable the camera for now
+lidar.disable()  
+cam.disable()    
 
-# Perform an initial step to update sensor values before using them.  This
-# ensures that the compass has a valid reading so we can record the
-# initial heading for later correction.  We do this only once at startup.
 robot.step(timestep_ms)
 initial_heading = 0.0
 if compass:
     initial_vals = compass.getValues()
     initial_heading = math.atan2(initial_vals[0], initial_vals[1])
 
-# Define a starting GPS coordinate for the maze.  These values should be
-# customised to match the coordinate of the (0,0) tile in your world.
 start_gps_x = 1.380
 start_gps_y = -1.388
 
@@ -79,12 +50,6 @@ right_motor.setPosition(float('inf'))
 left_motor.setVelocity(0.0)
 right_motor.setVelocity(0.0)
 
-# Precompute the number of control steps needed to travel exactly one tile at a
-# given wheel speed.  The linear speed of the robot is the wheel angular
-# velocity (rad/s) times the wheel radius.  Dividing the tile length by the
-# linear speed gives us the travel time.  Multiplying by the control step
-# frequency tells us how many control loops are required.  Rounding to the
-# nearest integer yields the number of wb_robot_step calls to perform.
 def steps_for_distance(distance: float, angular_speed: float) -> int:
     linear_speed = abs(angular_speed) * wheel_radius
     if linear_speed <= 0.0:
@@ -92,31 +57,31 @@ def steps_for_distance(distance: float, angular_speed: float) -> int:
     travel_time = distance / linear_speed
     return max(1, int(round(travel_time / timestep)))
 
+def send_message(message_string):
+    """
+    Sends a string message to the supervisor.
+    """
+    binary_data = message_string.encode('utf-8')
+    result = emitter.send(binary_data)
+
+    if result == 1:
+        print(f"E-puck: '{message_string}' sent successfully!")
+        return True
+    else:
+        return False
+
 
 # -----------------------------------------------------------------------------
-# 2. ARUCO TAG DETECTION (OPTIONAL)
+# 2. ARUCO TAG DETECTION
 # -----------------------------------------------------------------------------
 
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 parameters = cv2.aruco.DetectorParameters()
 detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
-def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.06) -> tuple:
-    """
-    Attempt to detect an ArUco tag on any wall adjacent to the robot.  The
-    robot uses its LiDAR to determine whether there is an obstacle close
-    enough to be considered a wall (less than ``wall_threshold`` metres
-    away).  If a wall is present, it will back up by ``scan_distance`` metres,
-    take a snapshot with the camera and attempt to decode an ArUco tag, then
-    move forward the same distance to restore its original position.  
-    
-    If no wall is present, OR if a wall is present but has no tag, the robot 
-    rotates 90° clockwise and repeats the test. After trying all four directions, 
-    the function returns ``(None, None, None, None)``. When a tag is detected 
-    the function returns ``(x, y, tag_id, binary_string)``.
-    """
+def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.2) -> tuple:
+    print("\n[SCANNER] Initiating 360-degree room scan for ArUco tags...")
     def detect_once() -> tuple:
-        """Capture a single camera frame and detect ArUco markers."""
         cam.enable(timestep_ms)
         robot.step(timestep_ms)
         raw = cam.getImage()
@@ -134,34 +99,10 @@ def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.06) -> 
             return x, y, tag_id, binary_str
         return None, None, None, None
 
-    def move_distance(distance: float, speed: float = 2.0) -> None:
-        """Move the robot forward or backward by a specified amount."""
-        rotation = distance / wheel_radius
-        current_left = left_ps.getValue()
-        current_right = right_ps.getValue()
-        target_left = current_left + rotation
-        target_right = current_right + rotation
-        vel = abs(speed)
-        left_motor.setVelocity(vel)
-        right_motor.setVelocity(vel)
-        left_motor.setPosition(target_left)
-        right_motor.setPosition(target_right)
-        while True:
-            if robot.step(timestep_ms) == -1:
-                return
-            if abs(left_ps.getValue() - target_left) < 0.01 and abs(right_ps.getValue() - target_right) < 0.01:
-                break
-        left_motor.setVelocity(0.0)
-        right_motor.setVelocity(0.0)
-        robot.step(timestep_ms)
-        left_motor.setPosition(float('inf'))
-        right_motor.setPosition(float('inf'))
-
     lidar.enable(timestep_ms)
     robot.step(timestep_ms)
     turns = 0  
     
-    # Try up to four directions: front, right, back, and left.
     for attempt in range(4):
         if attempt > 0:
             robot.step(timestep_ms)
@@ -171,26 +112,25 @@ def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.06) -> 
             front_dist = ranges[center]
             
             if not math.isinf(front_dist) and front_dist < wall_threshold:
+                print(f"[SCANNER] Wall found at {front_dist:.3f}m. Backing up to take photo...")
                 move_distance(-scan_distance)
                 result = detect_once()
                 move_distance(scan_distance)
                 
-                # CHECK IF A TAG WAS ACTUALLY FOUND
                 if result[2] is not None: 
-                    # Tag found! Restore orientation and return.
+                    print(f"[SCANNER] SUCCESS! Tag {result[2]} found.")
                     for _ in range(turns):
                         turn_left_90(correct=False)
                     lidar.disable()
                     return result
-                
-                # If no tag was found, it simply skips this block and continues
-                # to the turn_right_90() call below to check the next wall.
+                else:
+                    print("[SCANNER] Wall is blank. No tag detected.")
 
-        # No wall detected OR wall had no tag: rotate 90° and try the next side.
+        print("[SCANNER] Turning right to check next wall...")
         turn_right_90(correct=False)
         turns += 1
         
-    # No tag found on ANY side. Restore orientation and disable LiDAR.
+    print("[SCANNER] All 4 sides checked. No tags found.")
     for _ in range(turns):
         turn_left_90(correct=False)
     lidar.disable()
@@ -201,211 +141,39 @@ def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.06) -> 
 # 3. MOVEMENT PRIMITIVES
 # -----------------------------------------------------------------------------
 
-def move_forward_tiles(num_tiles: int, speed: float = 3.0) -> None:
-    """
-    Move forward a given number of tiles without continuously polling the GPS.
-    This routine computes how many control steps correspond to one tile at the
-    given wheel speed and runs the motors for that duration.  Because it no
-    longer checks the GPS at every step, it reduces overhead and allows the
-    robot to spend more of its time actually moving.  Note that the wheels
-    still run at the same angular velocity as before, so the robot's physical
-    speed is unchanged.
-    """
-    steps_per_tile = steps_for_distance(tile_length, speed)
-    # iterate tile by tile
-    for _ in range(num_tiles):
-        left_motor.setVelocity(speed)
-        right_motor.setVelocity(speed)
-        for _ in range(steps_per_tile):
-            if robot.step(timestep_ms) == -1:
-                return
-        left_motor.setVelocity(0.0)
-        right_motor.setVelocity(0.0)
-        # allow one extra step to update the sensors
-        robot.step(timestep_ms)
-
-
-def move_forward_tiles_position(num_tiles: int, speed: float = 3.0) -> None:
-    """
-    Move forward a given number of tiles using the motor's built‑in position
-    controller instead of manually counting control steps.  For each tile the
-    required wheel rotation is computed as `tile_length / wheel_radius` radians.
-    The current motor positions are read from the position sensors and the
-    target positions are commanded accordingly.  The motors are run at the
-    specified angular velocity until both wheels have reached their targets.
-    Because Webots handles the low‑level servoing, no GPS polling is needed.
-    """
-    # rotation required to travel exactly one tile
-    rotation = tile_length / wheel_radius
-    for _ in range(num_tiles):
-        # compute the absolute target positions for each motor
-        current_left = left_ps.getValue()
-        current_right = right_ps.getValue()
-        target_left = current_left + rotation
-        target_right = current_right + rotation
-        # set the velocity and desired position; motors will begin moving
-        left_motor.setVelocity(speed)
-        right_motor.setVelocity(speed)
-        left_motor.setPosition(target_left)
-        right_motor.setPosition(target_right)
-        while True:
-            # step the simulation and check if the motion has completed
-            if robot.step(timestep_ms) == -1:
-                return
-            # When the difference between current and target positions is small, stop
-            if abs(left_ps.getValue() - target_left) < 0.02 and abs(right_ps.getValue() - target_right) < 0.02:
-                break
-        # stop motors after each tile
-        left_motor.setVelocity(0.0)
-        right_motor.setVelocity(0.0)
-        robot.step(timestep_ms)
-        # restore velocity control before the next command
-        left_motor.setPosition(float('inf'))
-        right_motor.setPosition(float('inf'))
-
-
-def move_backward_tiles(num_tiles: int, speed: float = 3.0) -> None:
-    """
-    Move backward a given number of tiles using time‑based control.  The
-    absolute value of ``speed`` is used to compute the number of control steps
-    required per tile, but the motors are driven with a negative velocity to
-    move backwards.  This avoids polling the GPS at every step.
-    """
-    steps_per_tile = steps_for_distance(tile_length, speed)
-    for _ in range(num_tiles):
-        left_motor.setVelocity(-abs(speed))
-        right_motor.setVelocity(-abs(speed))
-        for _ in range(steps_per_tile):
-            if robot.step(timestep_ms) == -1:
-                return
-        left_motor.setVelocity(0.0)
-        right_motor.setVelocity(0.0)
-        robot.step(timestep_ms)
-
-
-def move_backward_tiles_position(num_tiles: int, speed: float = 3.0) -> None:
-    """
-    Move backward a given number of tiles using the motor's position controller.
-    Each wheel rotates backwards by ``tile_length / wheel_radius`` radians per
-    tile.  The motors are driven at the given angular speed while Webots
-    internally regulates the position.
-    """
-    rotation = tile_length / wheel_radius
-    for _ in range(num_tiles):
-        current_left = left_ps.getValue()
-        current_right = right_ps.getValue()
-        target_left = current_left - rotation
-        target_right = current_right - rotation
-        left_motor.setVelocity(abs(speed))
-        right_motor.setVelocity(abs(speed))
-        left_motor.setPosition(target_left)
-        right_motor.setPosition(target_right)
-        while True:
-            if robot.step(timestep_ms) == -1:
-                return
-            if abs(left_ps.getValue() - target_left) < 0.02 and abs(right_ps.getValue() - target_right) < 0.02:
-                break
-        left_motor.setVelocity(0.0)
-        right_motor.setVelocity(0.0)
-        robot.step(timestep_ms)
-        # restore velocity control before the next command
-        left_motor.setPosition(float('inf'))
-        right_motor.setPosition(float('inf'))
-
-
-def getXYfromgps() -> list:
-    """
-    Compute the integer (x, y) tile coordinates on a 12×12 grid based on the
-    current GPS reading.  The maze origin (0,0) corresponds to the
-    ``start_gps_x`` and ``start_gps_y`` variables defined at initialisation.
-    Distances are quantised to tile_length and clipped to the range [0,11].
-    """
-    gps_vals = gps.getValues()
-    rel_x = start_gps_x - gps_vals[0]
-    rel_y = gps_vals[1] - start_gps_y
-    new_x = int(round(rel_x / tile_length))
-    new_y = int(round(rel_y / tile_length))
-    # clip to grid bounds
-    new_x = max(0, min(new_x, 11))
-    new_y = max(0, min(new_y, 11))
-    return [new_x, new_y]
-
-
-def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
-                   check_wall: bool = True, wall_threshold: float = 0.3) -> None:
-    """
-    Adjust the robot's position so that the distance to the wall in front is
-    about ``target_distance`` metres.  If ``check_wall`` is True the LiDAR is
-    enabled and a single range image is scanned first; if the object in front
-    is farther than ``wall_threshold`` metres or the reading is infinite the
-    adjustment is skipped.  Otherwise, a simple proportional controller is used
-    to move forward/backward until the error falls within ``tolerance``.  The
-    LiDAR is disabled when finished.
-    """
-    # Enable LiDAR and fetch an initial scan
-    lidar.enable(timestep_ms)
-    robot.step(timestep_ms)
-    # Optional check for a wall before adjusting
-    if check_wall:
-        ranges = lidar.getRangeImage()
-        if ranges:
-            center = len(ranges) // 2
-            front = ranges[center]
-            # If no wall or too far, skip adjustment
-            if math.isinf(front) or front > wall_threshold:
-                lidar.disable()
-                return
-    max_speed = 1.5  # allow higher correction speed to finish sooner
-    min_speed = 0.2
+def move_distance(distance: float, speed: float = 2.0) -> None:
+    rotation = distance / wheel_radius
+    current_left = left_ps.getValue()
+    current_right = right_ps.getValue()
+    target_left = current_left + rotation
+    target_right = current_right + rotation
+    vel = abs(speed)
+    left_motor.setVelocity(vel)
+    right_motor.setVelocity(vel)
+    left_motor.setPosition(target_left)
+    right_motor.setPosition(target_right)
     while True:
         if robot.step(timestep_ms) == -1:
+            return
+        if abs(left_ps.getValue() - target_left) < 0.01 and abs(right_ps.getValue() - target_right) < 0.01:
             break
-        values = lidar.getRangeImage()
-        if not values:
-            continue
-        center = len(values) // 2
-        front = values[center]
-        if math.isinf(front):
-            break
-        error = front - target_distance
-        if abs(error) <= tolerance:
-            break
-        # proportional controller for adjustment
-        speed = max(min_speed, min(max_speed, abs(error) * 5))
-        if error > 0:
-            left_motor.setVelocity(speed)
-            right_motor.setVelocity(speed)
-        else:
-            left_motor.setVelocity(-speed)
-            right_motor.setVelocity(-speed)
     left_motor.setVelocity(0.0)
     right_motor.setVelocity(0.0)
-    lidar.disable()
-
+    robot.step(timestep_ms)
+    left_motor.setPosition(float('inf'))
+    right_motor.setPosition(float('inf'))
 
 def normalize_angle(angle: float) -> float:
-    """Normalize an angle to the range [-pi, pi]."""
     while angle > math.pi:
         angle -= 2 * math.pi
     while angle < -math.pi:
         angle += 2 * math.pi
     return angle
 
-
 def turn_left_90(correct: bool = True, tolerance: float = 0.05) -> None:
-    """
-    Rotate the robot 90 degrees counterclockwise.  After the initial turn the
-    compass reading is compared against the closest multiple of 90° from the
-    ``initial_heading``.  If the deviation exceeds ``tolerance`` radians and
-    ``correct`` is True, a slower corrective rotation is performed to reduce the
-    offset.  This mirrors the post‑turn correction logic in the original
-    controller while still allowing a larger tolerance on the main rotation.
-    """
-    # Determine current and target headings
     vals = compass.getValues()
     current_heading = math.atan2(vals[0], vals[1])
     target_heading = normalize_angle(current_heading + math.pi / 2)
-    # Perform primary rotation
     left_motor.setVelocity(-2.0)
     right_motor.setVelocity(2.0)
     while True:
@@ -418,18 +186,14 @@ def turn_left_90(correct: bool = True, tolerance: float = 0.05) -> None:
             break
     left_motor.setVelocity(0.0)
     right_motor.setVelocity(0.0)
-    # Post‑turn correction relative to initial heading
     if correct:
         robot.step(timestep_ms)
         vals = compass.getValues()
         current_heading = math.atan2(vals[0], vals[1])
-        # Angle relative to initial heading
         rel_angle = normalize_angle(current_heading - initial_heading)
-        # Closest multiple of 90° (0, ±pi/2, ±pi)
         multiples = [0.0, math.pi/2, math.pi, -math.pi/2, -math.pi]
         closest = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
         offset = normalize_angle(rel_angle - closest)
-        # If offset too large, apply correction
         if abs(offset) > tolerance:
             correction_speed = 0.8 if offset > 0 else -0.8
             left_motor.setVelocity(-correction_speed)
@@ -446,14 +210,7 @@ def turn_left_90(correct: bool = True, tolerance: float = 0.05) -> None:
             left_motor.setVelocity(0.0)
             right_motor.setVelocity(0.0)
 
-
 def turn_right_90(correct: bool = True, tolerance: float = 0.05) -> None:
-    """
-    Rotate the robot 90 degrees clockwise.  After the primary rotation the
-    heading is compared with the nearest multiple of 90° from the initial
-    heading.  If the offset exceeds ``tolerance`` and ``correct`` is True, a
-    slower corrective rotation is applied.
-    """
     vals = compass.getValues()
     current_heading = math.atan2(vals[0], vals[1])
     target_heading = normalize_angle(current_heading - math.pi / 2)
@@ -493,24 +250,291 @@ def turn_right_90(correct: bool = True, tolerance: float = 0.05) -> None:
             left_motor.setVelocity(0.0)
             right_motor.setVelocity(0.0)
 
+def move_forward_tiles(num_tiles: int, speed: float = 3.0) -> None:
+    steps_per_tile = steps_for_distance(tile_length, speed)
+    for _ in range(num_tiles):
+        left_motor.setVelocity(speed)
+        right_motor.setVelocity(speed)
+        for _ in range(steps_per_tile):
+            if robot.step(timestep_ms) == -1:
+                return
+        left_motor.setVelocity(0.0)
+        right_motor.setVelocity(0.0)
+        robot.step(timestep_ms)
+
+def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
+                   check_wall: bool = True, wall_threshold: float = 0.3) -> None:
+    lidar.enable(timestep_ms)
+    robot.step(timestep_ms)
+    if check_wall:
+        ranges = lidar.getRangeImage()
+        if ranges:
+            center = len(ranges) // 2
+            front = ranges[center]
+            if math.isinf(front) or front > wall_threshold:
+                print(f"   -> [ADJUST] No wall close enough to adjust to (Dist: {front:.3f}m). Skipping.")
+                lidar.disable()
+                return
+    
+    print(f"   -> [ADJUST] Squaring up to wall (Target: {target_distance}m)...")
+    max_speed = 1.5  
+    min_speed = 0.2
+    while True:
+        if robot.step(timestep_ms) == -1:
+            break
+        values = lidar.getRangeImage()
+        if not values:
+            continue
+        center = len(values) // 2
+        front = values[center]
+        if math.isinf(front):
+            break
+        error = front - target_distance
+        if abs(error) <= tolerance:
+            print(f"   -> [ADJUST] Centered successfully. Error is {error:.3f}m.")
+            break
+        speed = max(min_speed, min(max_speed, abs(error) * 5))
+        if error > 0:
+            left_motor.setVelocity(speed)
+            right_motor.setVelocity(speed)
+        else:
+            left_motor.setVelocity(-speed)
+            right_motor.setVelocity(-speed)
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    lidar.disable()
+
+def adjust_to_side_wall(wall_threshold: float = 0.25) -> None:
+    print("\n[DRIFT FIX] Initiating side-wall check to re-center Y-axis...")
+    print("   -> Turning Left 90 deg...")
+    turn_left_90(correct=True)
+    
+    if check_wall_ahead(threshold=wall_threshold):
+        print("   -> Left wall detected. Adjusting to it.")
+        adjust_to_wall()
+        print("   -> Turning Right 90 deg back to forward path.")
+        turn_right_90(correct=True)
+        return
+
+    print("   -> No Left wall. Turning 180 deg to check Right wall...")
+    turn_right_90(correct=True)
+    turn_right_90(correct=True)
+    
+    if check_wall_ahead(threshold=wall_threshold):
+        print("   -> Right wall detected. Adjusting to it.")
+        adjust_to_wall()
+        print("   -> Turning Left 90 deg back to forward path.")
+        turn_left_90(correct=True)
+        return
+        
+    print("   -> Open intersection. No walls on either side. Resuming.")
+    turn_left_90(correct=True)
+
+#----------------------------------------------
+# Navigation Primitives
+#----------------------------------------------
+def turn_to_heading(target_h: int):
+    global current_heading
+    diff = (target_h - current_heading) % 4
+    
+    if diff == 1:
+        print("   -> [TURN] Action: Turn Left 90°")
+        turn_left_90()
+    elif diff == 2:
+        print("   -> [TURN] Action: Turn Left 180°")
+        turn_left_90()
+        turn_left_90()
+    elif diff == 3:
+        print("   -> [TURN] Action: Turn Right 90°")
+        turn_right_90()
+        
+    current_heading = target_h
+
+def check_wall_ahead(threshold: float = 0.18) -> bool:
+    lidar.enable(timestep_ms)
+    robot.step(timestep_ms)
+    ranges = lidar.getRangeImage()
+    lidar.disable()
+    
+    if ranges:
+        center = len(ranges) // 2
+        span = max(1, len(ranges) // 15) 
+        front_rays = ranges[center - span : center + span]
+        
+        valid_rays = [r for r in front_rays if not math.isinf(r)]
+        if valid_rays:
+            min_dist = min(valid_rays)
+            print(f"   -> [LiDAR RAW] Closest object in front cone is {min_dist:.3f}m away.")
+            if min_dist < threshold:
+                print(f"   -> [LiDAR ALERT] {min_dist:.3f}m is < {threshold}m threshold. WALL CONFIRMED.")
+                return True
+            else:
+                print(f"   -> [LiDAR SAFE] {min_dist:.3f}m means path is clear.")
+    return False
+
+def navigate_to_target(target_x, target_y):
+    global current_x, current_y, current_heading
+    straight_tiles_count = 0
+    print(f"\n========== NEW NAVIGATION GOAL: ({target_x}, {target_y}) ==========")
+    
+    while (current_x, current_y) != (target_x, target_y):
+        print(f"\n[NAV-LOOP] Pos: ({current_x}, {current_y}) | Heading: {current_heading}")
+        path = get_shortest_path_astar((current_x, current_y), (target_x, target_y))
+        
+        if not path or len(path) < 2:
+            print(f"[FATAL ERROR] A* cannot find a path! Known walls must be completely boxing us in.")
+            print(f"   -> Known walls memory dump: {known_walls}")
+            return False
+            
+        print(f"   -> [A* CALC] Shortest path looks like: {path}")
+        next_node = path[1]
+        target_h = get_target_heading((current_x, current_y), next_node)
+        
+        if target_h != current_heading:
+            print(f"   -> [ACTION] Need to change heading from {current_heading} to {target_h}")
+            turn_to_heading(target_h)
+            straight_tiles_count = 0 
+            
+        print(f"   -> [ACTION] Scanning forward path to {next_node}...")
+        if check_wall_ahead():
+            print(f"   -> [OBSTACLE] Unexpected wall detected between {(current_x, current_y)} and {next_node}!")
+            
+            print("   -> [ACTION] Squaring up to this wall to fix drift before recalculating...")
+            adjust_to_wall()
+            
+            blocked_boundary = get_wall_id((current_x, current_y), next_node)
+            known_walls.add(blocked_boundary)
+            print(f"   -> [MAPPING] Wall {blocked_boundary} saved to memory. Restarting loop to replan.")
+            straight_tiles_count = 0 
+            continue 
+            
+        print(f"   -> [ACTION] Path is physically clear. Moving Forward 1 tile to {next_node}.")
+        move_forward_tiles(1)
+        current_x, current_y = next_node
+        straight_tiles_count += 1
+        
+        if straight_tiles_count >= 4:
+            print(f"   -> [TRIGGER] Moved 4 straight tiles. Activating side-wall drift check.")
+            adjust_to_side_wall()
+            straight_tiles_count = 0 
+            
+    print(f"========== ARRIVED AT GOAL: ({target_x}, {target_y}) ==========\n")
+    return True
 
 # -----------------------------------------------------------------------------
 # 4. MAIN EXECUTION
 # -----------------------------------------------------------------------------
 
-def main() -> None:
-    """
-    A simple demonstration sequence exercising several of the available
-    primitives.  The robot moves forward, scans its GPS position, optionally
-    adjusts to a wall, turns and moves backward.  You can modify this logic
-    depending on your maze and objectives.
-    """
-    while robot.step(timestep_ms) != -1:
+current_x = 0
+current_y = 0
+current_heading = 0 
+known_walls = set() 
 
+def detect_final_wall_color() -> str:
+    cam.enable(timestep_ms)
+    robot.step(timestep_ms)
+    robot.step(timestep_ms) 
+    
+    raw = cam.getImage()
+    cam.disable()
+    
+    if not raw: return "Unknown"
+    
+    img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
+    h, w = img.shape[:2]
+    
+    center_patch = img[h//2-10:h//2+10, w//2-10:w//2+10]
+    mean_color = cv2.mean(center_patch)
+    b, g, r = mean_color[0], mean_color[1], mean_color[2]
+    
+    if max(r, g, b) < 60: return "Black"
+    elif r > g and r > b: return "Red"
+    elif g > r and g > b: return "Green"
+    elif b > r and b > g: return "Blue"
         
-        print(scan_aruco_tag())  # optional tag scanning
+    return "Unknown"
+
+def get_wall_id(node_a, node_b):
+    return tuple(sorted([node_a, node_b]))
+
+def get_heuristic(node, target):
+    return abs(node[0] - target[0]) + abs(node[1] - target[1])
+
+def get_shortest_path_astar(start, target, grid_size=12):
+    queue = [(get_heuristic(start, target), 0, start, [start])]
+    visited_costs = {start: 0}
+    
+    while queue:
+        f, g, current_node, path = heapq.heappop(queue)
+        if current_node == target:
+            return path
+            
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            next_node = (current_node[0] + dx, current_node[1] + dy)
+            if not (0 <= next_node[0] < grid_size and 0 <= next_node[1] < grid_size):
+                continue
+                
+            wall_boundary = get_wall_id(current_node, next_node)
+            if wall_boundary in known_walls:
+                continue
+                
+            new_g = g + 1
+            if next_node not in visited_costs or new_g < visited_costs[next_node]:
+                visited_costs[next_node] = new_g
+                new_f = new_g + get_heuristic(next_node, target)
+                heapq.heappush(queue, (new_f, new_g, next_node, path + [next_node]))
+                
+    return None 
+
+def get_target_heading(current_node, next_node):
+    dx = next_node[0] - current_node[0]
+    dy = next_node[1] - current_node[1]
+    
+    if dy == 1: return 0  
+    if dx == 1: return 1  
+    if dy == -1: return 2 
+    if dx == -1: return 3 
+    return 0
+
+def main() -> None:
+    global current_x, current_y
+    
+    robot.step(timestep_ms) 
+    
+    print("========== BOOT SEQUENCE ==========")
+    print("Moving forward to first wall...")
+    while(not check_wall_ahead()):
+        move_forward_tiles(1)
+        current_y += 1 
+    
+    print("Initial blind run complete. Squaring up to starting wall...")
+    adjust_to_wall()
+    
+    while robot.step(timestep_ms) != -1:
         
-        break
+        x, y, tag_id, binary_str = scan_aruco_tag()
+        
+        if tag_id is not None:
+            print(f"--- VALID TAG DETECTED ---")
+            print(f"Decimal ID: {tag_id} | Binary: {binary_str}")
+            print(f"Decoded Target Coordinate: X={x}, Y={y}")
+            
+            if x == current_x and y == current_y:
+                print("[SUCCESS] Tag coordinate matches current location. Ending navigation.")
+                break
+                
+            success = navigate_to_target(x, y)
+            if not success:
+                break 
+                
+        else:
+            print("\n[FINISH] No tags found in room. Reached final location.")
+            break
+            
+    print("\nAttempting to read final wall color...")
+    color = detect_final_wall_color()
+    print(f"Final Wall Color Detected: {color}")
+    send_message(color)
 
 
 if __name__ == '__main__':
