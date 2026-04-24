@@ -139,7 +139,7 @@ def scan_and_register_walls():
 # -----------------------------------------------------------------------------
 def is_on_perimeter(x, y, grid_size=12):
     """Strictly hardcoded check to ensure 0 and 15 are recognized as outer walls."""
-    print(f"Checking perimeter for ({x}, {y})")
+    # print(f"Checking perimeter for ({x}, {y})")
     return x == 0 or x == 11 or y == 0 or y == 11
 
 def is_dead_end(start_node, target_node, avoid_node, grid_size=12):
@@ -173,7 +173,7 @@ def get_rule_based_next_node(current, target, grid_size=12):
     # 1. STATE: RE-ENGAGE RULES IF WE TOUCH THE OUTER WALL
     if is_on_perimeter(current[0], current[1], grid_size):
         if not perimeter_mode:
-            print(f"[RULE ENGINE] Reached outer wall at ({current[0]}, {current[1]}). Engaging rules.")
+            # print(f"[RULE ENGINE] Reached outer wall at ({current[0]}, {current[1]}). Engaging rules.")
             perimeter_mode = True
     else:
         # 2. STATE: OFF-PERIMETER (Rule Released)
@@ -212,7 +212,7 @@ def get_rule_based_next_node(current, target, grid_size=12):
 
     # 4. TRIGGER: PERIMETER BLOCKED
     # Added the coordinate to the print so you can see exactly where it gets trapped
-    print(f"[RULE ENGINE] Perimeter blocked at ({current[0]}, {current[1]})! Releasing rules to move inward.")
+    # print(f"[RULE ENGINE] Perimeter blocked at ({current[0]}, {current[1]})! Releasing rules to move inward.")
     perimeter_mode = False
     
     path = get_shortest_path_bfs(current, target, grid_size)
@@ -654,7 +654,7 @@ def navigate_to_target(target_x, target_y):
         res = check_camera_quick(target_pos=(target_x, target_y))
         
         if res:
-            print(f">>> Early Tag validated within 4-tile radius! (X, Y): ({res[0]}, {res[1]})")
+            # print(f">>> Early Tag validated within 4-tile radius! (X, Y): ({res[0]}, {res[1]})")
             return True, res
 
         # --- DYNAMIC RULE-BASED DECISION ---
@@ -764,7 +764,7 @@ def main():
 
     if next_tag_data:
         x, y, tag_id, binary_str = next_tag_data
-        print(f">>> Initial Scan: Valid Tag Found straight ahead! Decoded (X, Y): ({x}, {y})")
+        # print(f">>> Initial Scan: Valid Tag Found straight ahead! Decoded (X, Y): ({x}, {y})")
 
     # --- 2. ENTER THE MAZE ---
     while not check_wall_ahead():
@@ -802,7 +802,6 @@ def main():
     color = detect_final_wall_color()
     print(f"Final Wall Color: {color}")
     send_message(color)
-    print("Time taken:", robot.getTime()/60)
-
+    print("Time taken - {:.2f} minutes:{:.2f} seconds".format(*divmod(robot.getTime(), 60)))
 if __name__ == '__main__':
     main()
