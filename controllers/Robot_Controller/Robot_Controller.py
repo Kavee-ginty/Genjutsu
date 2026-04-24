@@ -9,89 +9,61 @@ lidar.enable(timestep)
 lidar.enablePointCloud()
 
 # --- PRECISE DISTANCE THRESHOLDS ---
-NEAR_WALL_MAX = 0.20  
-FAR_ORTHO_MIN = 0.30
-FAR_ORTHO_MAX = 0.45
-FAR_DIAG_MIN = 0.22
-FAR_DIAG_MAX = 0.35
+NEAR_WALL_MAX = 0.20  # Inner walls (~0.125m)
+FAR_WALL_MIN  = 0.30  # Next tile's far walls (~0.375m)
+FAR_WALL_MAX  = 0.45  
 
 def get_avg_dist(sector):
     """Safely calculates average distance, ignoring 'inf' out-of-range values."""
     valid_rays = [r for r in sector if r != float('inf') and r > 0]
     return sum(valid_rays) / len(valid_rays) if valid_rays else float('inf')
 
-def scan_16_walls(ranges, f, N):
+def scan_8_walls(ranges, f, N):
     walls = {}
     
-    # --- 1. SLICE ALL SECTORS ---
-    # Orthogonal
+    # --- 1. SLICE ONLY THE 4 ORTHOGONAL SECTORS ---
     s_front = ranges[int(170*f) : int(190*f)]
-    s_back  = ranges[int(350*f):N] + ranges[0:int(10*f)]
-    s_left  = ranges[int(80*f) : int(100*f)]
+    s_back  = ranges[int(350*f):N] + ranges[0:int(10*f)] # Wrap around
+    s_left  = ranges[int(80*f)  : int(100*f)]
     s_right = ranges[int(260*f) : int(280*f)]
-    
-    # Diagonals (Looking into neighbors)
-    s_f_nl = ranges[int(150*f) : int(160*f)] # Front Neighbor's Left Wall
-    s_f_nr = ranges[int(200*f) : int(210*f)] # Front Neighbor's Right Wall
-    
-    s_b_nl = ranges[int(20*f) : int(30*f)]   # Back Neighbor's Left Wall
-    s_b_nr = ranges[int(330*f) : int(340*f)] # Back Neighbor's Right Wall
-    
-    s_l_nf = ranges[int(110*f) : int(120*f)] # Left Neighbor's Front Wall
-    s_l_nb = ranges[int(60*f) : int(70*f)]   # Left Neighbor's Back Wall
-    
-    s_r_nf = ranges[int(240*f) : int(250*f)] # Right Neighbor's Front Wall
-    s_r_nb = ranges[int(290*f) : int(300*f)] # Right Neighbor's Back Wall
 
     # --- 2. EVALUATE WITH OCCLUSION LOGIC ---
     
-    # FRONT DIRECTION
-    if get_avg_dist(s_front) < NEAR_WALL_MAX:
-        walls['Center_Front_Wall']         = "WALL"
-        walls['Front_Neighbor_Front_Wall'] = "UNKNOWN"
-        walls['Front_Neighbor_Left_Wall']  = "UNKNOWN"
-        walls['Front_Neighbor_Right_Wall'] = "UNKNOWN"
+    # FRONT
+    d_front = get_avg_dist(s_front)
+    if d_front < NEAR_WALL_MAX:
+        walls['front']       = "WALL"
+        walls['front_front'] = "UNKNOWN"
     else:
-        walls['Center_Front_Wall']         = "OPEN"
-        walls['Front_Neighbor_Front_Wall'] = "WALL" if (FAR_ORTHO_MIN < get_avg_dist(s_front) < FAR_ORTHO_MAX) else "OPEN"
-        walls['Front_Neighbor_Left_Wall']  = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_f_nl) < FAR_DIAG_MAX) else "OPEN"
-        walls['Front_Neighbor_Right_Wall'] = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_f_nr) < FAR_DIAG_MAX) else "OPEN"
+        walls['front']       = "OPEN"
+        walls['front_front'] = "WALL" if (FAR_WALL_MIN < d_front < FAR_WALL_MAX) else "OPEN"
 
-    # BACK DIRECTION
-    if get_avg_dist(s_back) < NEAR_WALL_MAX:
-        walls['Center_Back_Wall']         = "WALL"
-        walls['Back_Neighbor_Back_Wall']  = "UNKNOWN"
-        walls['Back_Neighbor_Left_Wall']  = "UNKNOWN"
-        walls['Back_Neighbor_Right_Wall'] = "UNKNOWN"
+    # BACK
+    d_back = get_avg_dist(s_back)
+    if d_back < NEAR_WALL_MAX:
+        walls['back']      = "WALL"
+        walls['back_back'] = "UNKNOWN"
     else:
-        walls['Center_Back_Wall']         = "OPEN"
-        walls['Back_Neighbor_Back_Wall']  = "WALL" if (FAR_ORTHO_MIN < get_avg_dist(s_back) < FAR_ORTHO_MAX) else "OPEN"
-        walls['Back_Neighbor_Left_Wall']  = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_b_nl) < FAR_DIAG_MAX) else "OPEN"
-        walls['Back_Neighbor_Right_Wall'] = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_b_nr) < FAR_DIAG_MAX) else "OPEN"
+        walls['back']      = "OPEN"
+        walls['back_back'] = "WALL" if (FAR_WALL_MIN < d_back < FAR_WALL_MAX) else "OPEN"
 
-    # LEFT DIRECTION
-    if get_avg_dist(s_left) < NEAR_WALL_MAX:
-        walls['Center_Left_Wall']         = "WALL"
-        walls['Left_Neighbor_Left_Wall']  = "UNKNOWN"
-        walls['Left_Neighbor_Front_Wall'] = "UNKNOWN"
-        walls['Left_Neighbor_Back_Wall']  = "UNKNOWN"
+    # LEFT
+    d_left = get_avg_dist(s_left)
+    if d_left < NEAR_WALL_MAX:
+        walls['left']      = "WALL"
+        walls['left_left'] = "UNKNOWN"
     else:
-        walls['Center_Left_Wall']         = "OPEN"
-        walls['Left_Neighbor_Left_Wall']  = "WALL" if (FAR_ORTHO_MIN < get_avg_dist(s_left) < FAR_ORTHO_MAX) else "OPEN"
-        walls['Left_Neighbor_Front_Wall'] = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_l_nf) < FAR_DIAG_MAX) else "OPEN"
-        walls['Left_Neighbor_Back_Wall']  = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_l_nb) < FAR_DIAG_MAX) else "OPEN"
+        walls['left']      = "OPEN"
+        walls['left_left'] = "WALL" if (FAR_WALL_MIN < d_left < FAR_WALL_MAX) else "OPEN"
 
-    # RIGHT DIRECTION
-    if get_avg_dist(s_right) < NEAR_WALL_MAX:
-        walls['Center_Right_Wall']         = "WALL"
-        walls['Right_Neighbor_Right_Wall'] = "UNKNOWN"
-        walls['Right_Neighbor_Front_Wall'] = "UNKNOWN"
-        walls['Right_Neighbor_Back_Wall']  = "UNKNOWN"
+    # RIGHT
+    d_right = get_avg_dist(s_right)
+    if d_right < NEAR_WALL_MAX:
+        walls['right']       = "WALL"
+        walls['right_right'] = "UNKNOWN"
     else:
-        walls['Center_Right_Wall']         = "OPEN"
-        walls['Right_Neighbor_Right_Wall'] = "WALL" if (FAR_ORTHO_MIN < get_avg_dist(s_right) < FAR_ORTHO_MAX) else "OPEN"
-        walls['Right_Neighbor_Front_Wall'] = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_r_nf) < FAR_DIAG_MAX) else "OPEN"
-        walls['Right_Neighbor_Back_Wall']  = "WALL" if (FAR_DIAG_MIN < get_avg_dist(s_r_nb) < FAR_DIAG_MAX) else "OPEN"
+        walls['right']       = "OPEN"
+        walls['right_right'] = "WALL" if (FAR_WALL_MIN < d_right < FAR_WALL_MAX) else "OPEN"
 
     return walls
 
@@ -103,30 +75,27 @@ while robot.step(timestep) != -1:
         N = len(ranges)
         f = N / 360 
         
-        wall_map = scan_16_walls(ranges, f, N)
+        wall_map = scan_8_walls(ranges, f, N)
         
-        print("\n" + "="*45)
-        print("         16-WALL OCCLUSION MAPPER         ")
-        print("="*45)
+        # --- CONSOLE OUTPUT ---
+        print("\n" + "="*35)
+        print("     8-WALL ORTHOGONAL SCANNER     ")
+        print("="*35)
         
-        categories = {
-            "Center Tile": ['Center_Front_Wall', 'Center_Back_Wall', 'Center_Left_Wall', 'Center_Right_Wall'],
-            "Front Neighbor": ['Front_Neighbor_Front_Wall', 'Front_Neighbor_Left_Wall', 'Front_Neighbor_Right_Wall'],
-            "Left Neighbor": ['Left_Neighbor_Left_Wall', 'Left_Neighbor_Front_Wall', 'Left_Neighbor_Back_Wall'],
-            "Right Neighbor": ['Right_Neighbor_Right_Wall', 'Right_Neighbor_Front_Wall', 'Right_Neighbor_Back_Wall'],
-            "Back Neighbor": ['Back_Neighbor_Back_Wall', 'Back_Neighbor_Left_Wall', 'Back_Neighbor_Right_Wall']
-        }
+        # Helper to format the output nicely
+        def format_status(state):
+            if state == "WALL": return "[### WALL ###]"
+            if state == "OPEN": return "[   OPEN   ]"
+            return "[ ? UNKNOWN]"
         
-        for category, keys in categories.items():
-            print(f"\n--- {category} ---")
-            for key in keys:
-                state = wall_map[key]
-                # Formatting the output to make it easy to read
-                if state == "WALL":
-                    status = "[### WALL ###]"
-                elif state == "OPEN":
-                    status = "[   OPEN   ]"
-                else:
-                    status = "[ ? UNKNOWN]"
-                    
-                print(f"{key.replace('_', ' '):<28} : {status}")
+        print("\n--- Center Tile ---")
+        print(f"Front         : {format_status(wall_map['front'])}")
+        print(f"Back          : {format_status(wall_map['back'])}")
+        print(f"Left          : {format_status(wall_map['left'])}")
+        print(f"Right         : {format_status(wall_map['right'])}")
+        
+        print("\n--- Neighbor Tiles (Look-Ahead) ---")
+        print(f"Front-Front   : {format_status(wall_map['front_front'])}")
+        print(f"Back-Back     : {format_status(wall_map['back_back'])}")
+        print(f"Left-Left     : {format_status(wall_map['left_left'])}")
+        print(f"Right-Right   : {format_status(wall_map['right_right'])}")
