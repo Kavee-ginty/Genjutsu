@@ -1,10 +1,9 @@
-# Improved version of the e‑puck controller.
+# E-Puck Maze Controller — Turn Logging Edition
 import math
 import cv2
 import numpy as np
 from controller import Robot
 import collections
-import heapq
 
 # -----------------------------------------------------------------------------
 # 1. INITIALIZATION & CONSTANTS
@@ -14,136 +13,307 @@ robot = Robot()
 timestep_ms = int(robot.getBasicTimeStep())
 timestep = timestep_ms / 1000.0
 
-tile_length = 0.25  
-wheel_radius = 0.0205  
+tile_length  = 0.25
+wheel_radius = 0.0205
+turn_counter = 0
 
-emitter = robot.getDevice('emitter_2')
-cam = robot.getDevice('camera')
-gps = robot.getDevice('gps')
-compass = robot.getDevice('compass')
-lidar = robot.getDevice('lidar')
-left_motor = robot.getDevice('left wheel motor')
+emitter     = robot.getDevice('emitter_2')
+cam         = robot.getDevice('camera')
+gps         = robot.getDevice('gps')
+compass     = robot.getDevice('compass')
+lidar       = robot.getDevice('lidar')
+left_motor  = robot.getDevice('left wheel motor')
 right_motor = robot.getDevice('right wheel motor')
 
-left_ps = left_motor.getPositionSensor()
+left_ps  = left_motor.getPositionSensor()
 right_ps = right_motor.getPositionSensor()
 left_ps.enable(timestep_ms)
 right_ps.enable(timestep_ms)
 
 gps.enable(timestep_ms)
 compass.enable(timestep_ms)
+
+lidar.enable(timestep_ms)
 lidar.enablePointCloud()
-lidar.disable()  
-cam.disable()    
+
+# --- CAMERA STATE MANAGEMENT ---
+cam_is_on = False
+processed_tags = set()
+
+def toggle_camera(state):
+    """Turns the camera on/off to save CPU processing."""
+    global cam_is_on
+    if state and not cam_is_on:
+        cam.enable(timestep_ms)
+        cam_is_on = True
+    elif not state and cam_is_on:
+        cam.disable()
+        cam_is_on = False
+
+# Start with camera ON to find the first tag
+toggle_camera(True)
 
 robot.step(timestep_ms)
+robot.step(timestep_ms)
+
 initial_heading = 0.0
 if compass:
-    initial_vals = compass.getValues()
+    initial_vals    = compass.getValues()
     initial_heading = math.atan2(initial_vals[0], initial_vals[1])
-
-start_gps_x = 1.380
-start_gps_y = -1.388
 
 left_motor.setPosition(float('inf'))
 right_motor.setPosition(float('inf'))
 left_motor.setVelocity(0.0)
 right_motor.setVelocity(0.0)
 
-def steps_for_distance(distance: float, angular_speed: float) -> int:
-    linear_speed = abs(angular_speed) * wheel_radius
-    if linear_speed <= 0.0:
-        return 0
-    travel_time = distance / linear_speed
-    return max(1, int(round(travel_time / timestep)))
-
-def send_message(message_string):
-    """
-    Sends a string message to the supervisor.
-    """
-    binary_data = message_string.encode('utf-8')
-    result = emitter.send(binary_data)
-    return result == 1
-
+NEAR_WALL_MAX = 0.20   
+FAR_WALL_MIN  = 0.30   
+FAR_WALL_MAX  = 0.45
 
 # -----------------------------------------------------------------------------
-# 2. ARUCO TAG DETECTION
+# 2. 8-WALL LIDAR FUNCTIONS
+# -----------------------------------------------------------------------------
+
+def get_avg_dist(sector):
+    valid = [r for r in sector if r != float('inf') and r > 0]
+    return sum(valid) / len(valid) if valid else float('inf')
+
+def scan_8_walls(ranges, f, N):
+    walls = {}
+    s_front = ranges[int(170*f) : int(190*f)]
+    s_back  = ranges[int(350*f):N] + ranges[0:int(10*f)]
+    s_left  = ranges[int(80*f)  : int(100*f)]
+    s_right = ranges[int(260*f) : int(280*f)]
+
+    d_front = get_avg_dist(s_front)
+    if d_front < NEAR_WALL_MAX:
+        walls['front']       = "WALL"
+        walls['front_front'] = "UNKNOWN"
+    else:
+        walls['front']       = "OPEN"
+        walls['front_front'] = "WALL" if FAR_WALL_MIN < d_front < FAR_WALL_MAX else "OPEN"
+
+    d_back = get_avg_dist(s_back)
+    if d_back < NEAR_WALL_MAX:
+        walls['back']      = "WALL"
+        walls['back_back'] = "UNKNOWN"
+    else:
+        walls['back']      = "OPEN"
+        walls['back_back'] = "WALL" if FAR_WALL_MIN < d_back < FAR_WALL_MAX else "OPEN"
+
+    d_left = get_avg_dist(s_left)
+    if d_left < NEAR_WALL_MAX:
+        walls['left']      = "WALL"
+        walls['left_left'] = "UNKNOWN"
+    else:
+        walls['left']      = "OPEN"
+        walls['left_left'] = "WALL" if FAR_WALL_MIN < d_left < FAR_WALL_MAX else "OPEN"
+
+    d_right = get_avg_dist(s_right)
+    if d_right < NEAR_WALL_MAX:
+        walls['right']       = "WALL"
+        walls['right_right'] = "UNKNOWN"
+    else:
+        walls['right']       = "OPEN"
+        walls['right_right'] = "WALL" if FAR_WALL_MIN < d_right < FAR_WALL_MAX else "OPEN"
+
+    return walls
+
+def get_wall_map():
+    robot.step(timestep_ms)
+    ranges = lidar.getRangeImage()
+    if not ranges: return {}
+    N = len(ranges)
+    f = N / 360
+    return scan_8_walls(ranges, f, N)
+
+def scan_and_register_walls():
+    wall_map = get_wall_map()
+    if not wall_map: return
+
+    heading_to_delta = {0: (0, 1), 1: (1, 0), 2: (0, -1), 3: (-1, 0)}
+    sensor_heading_offsets = {'front': 0, 'right': 3, 'back': 2, 'left': 1}
+
+    def register_if_wall(sensor_key, tile_delta_steps):
+        if wall_map.get(sensor_key) != "WALL": return
+        abs_heading = (current_heading + sensor_heading_offsets[sensor_key]) % 4
+        dx, dy = heading_to_delta[abs_heading]
+        neighbor = (current_x + dx * tile_delta_steps, current_y + dy * tile_delta_steps)
+        here     = (current_x + dx * (tile_delta_steps - 1), current_y + dy * (tile_delta_steps - 1))
+        known_walls.add(get_wall_id(here, neighbor))
+
+    for direction in ('front', 'back', 'left', 'right'):
+        register_if_wall(direction, 1)
+
+    look_ahead_map = {'front_front': 'front', 'back_back': 'back', 'left_left': 'left', 'right_right': 'right'}
+    for far_key, near_key in look_ahead_map.items():
+        if wall_map.get(near_key) == "OPEN" and wall_map.get(far_key) == "WALL":
+            register_if_wall(near_key, 2)
+
+# -----------------------------------------------------------------------------
+# 3. HELPER UTILITIES
+# -----------------------------------------------------------------------------
+
+def steps_for_distance(distance, angular_speed):
+    linear_speed = abs(angular_speed) * wheel_radius
+    if linear_speed <= 0.0: return 0
+    return max(1, int(round(distance / linear_speed / timestep)))
+
+def send_message(message_string):
+    binary_data = message_string.encode('utf-8')
+    return emitter.send(binary_data) == 1
+
+def normalize_angle(angle):
+    while angle >  math.pi: angle -= 2 * math.pi
+    while angle < -math.pi: angle += 2 * math.pi
+    return angle
+
+def get_wall_id(node_a, node_b):
+    return tuple(sorted([node_a, node_b]))
+
+# -----------------------------------------------------------------------------
+# 4. ARUCO TAG DETECTION
 # -----------------------------------------------------------------------------
 
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 parameters = cv2.aruco.DetectorParameters()
-detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+detector   = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
-def scan_aruco_tag(wall_threshold: float = 0.3, scan_distance: float = 0.2) -> tuple:
-    def detect_once() -> tuple:
-        cam.enable(timestep_ms)
-        robot.step(timestep_ms)
-        raw = cam.getImage()
-        cam.disable()
-        if not raw:
-            return None, None, None, None
-        img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
-        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-        corners, ids, _ = detector.detectMarkers(gray)
-        if ids is not None:
-            tag_id = int(ids[0][0])
-            binary_str = format(tag_id, '08b')
-            x = (tag_id >> 4) & 0x0F
-            y = tag_id & 0x0F
-            return x, y, tag_id, binary_str
-        return None, None, None, None
-
-    lidar.enable(timestep_ms)
+def check_camera_quick():
+    """Checks the camera IF it is currently on. Filters out glitch readings."""
+    if not cam_is_on: return None
+    
     robot.step(timestep_ms)
-    turns = 0  
+    raw = cam.getImage()
+    if not raw: return None
     
-    for attempt in range(4):
-        if attempt > 0:
-            robot.step(timestep_ms)
-        ranges = lidar.getRangeImage()
-        if ranges:
-            center = len(ranges) // 2
-            front_dist = ranges[center]
-            
-            if not math.isinf(front_dist) and front_dist < wall_threshold:
-                move_distance(-scan_distance)
-                result = detect_once()
-                move_distance(scan_distance)
-                
-                if result[2] is not None: 
-                    for _ in range(turns):
-                        turn_left_90(correct=False)
-                    lidar.disable()
-                    return result
-
-        turn_right_90(correct=False)
-        turns += 1
+    img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+    
+    if ids is not None:
+        tag_id = int(ids[0][0])
         
-    for _ in range(turns):
-        turn_left_90(correct=False)
-    lidar.disable()
+        if tag_id in processed_tags:
+            return None
+            
+        x = (tag_id >> 4) & 0x0F
+        y = tag_id & 0x0F
+        
+        # Anti-Hallucination: If the coordinate is outside a 12x12 maze, ignore it.
+        if x >= 12 or y >= 12:
+            return None
+
+        processed_tags.add(tag_id)
+        binary_str = format(tag_id, '08b')
+        return (x, y, tag_id, binary_str)
+        
+    return None
+
+def scan_aruco_tag(scan_distance=0.2):
+    """
+    Intelligent close-range scan: Prioritizes walls parallel to the X-axis.
+    """
+    wall_map = get_wall_map()
+    offsets = {'front': 0, 'left': 1, 'right': 3, 'back': 2}
+    start_heading = current_heading
     
+    # 1. Collect all valid walls we can look at
+    walls_to_check = []
+    for sensor, offset in offsets.items():
+        if wall_map.get(sensor) == "WALL":
+            target_h = (start_heading + offset) % 4
+            walls_to_check.append({
+                'sensor': sensor,
+                'target_h': target_h,
+                'offset': offset
+            })
+            
+    # 2. Sort to prioritize walls parallel to the X-axis
+    # Headings 0 (+Y) and 2 (-Y) look at walls parallel to X.
+    # By sorting by `target_h % 2`, Headings 0 and 2 yield `0` (moved to the front), 
+    # while Headings 1 and 3 yield `1` (moved to the back).
+    walls_to_check.sort(key=lambda x: x['target_h'] % 2)
+    
+    # 3. Execute the scan in the prioritized order
+    for wall in walls_to_check:
+        target_h = wall['target_h']
+        sensor = wall['sensor']
+        
+        if target_h != current_heading:
+            turn_to_heading(target_h, speed=6.28, reason=f"Scanning {sensor} wall (Heading {target_h}) for AR Tag")
+        
+        # First try: Instant check
+        res = check_camera_quick()
+        if res: return res
+        
+        # Second try: Back up slightly to widen Camera FOV
+        move_distance(-scan_distance, speed=6.28)
+        res = check_camera_quick()
+        move_distance(scan_distance, speed=6.28)
+        
+        if res: return res
+
     return None, None, None, None
 
 # -----------------------------------------------------------------------------
-# 3. MOVEMENT PRIMITIVES
+# 5. MOVEMENT PRIMITIVES & DRIFT CORRECTION
 # -----------------------------------------------------------------------------
 
-def move_distance(distance: float, speed: float = 2.0) -> None:
-    rotation = distance / wheel_radius
-    current_left = left_ps.getValue()
-    current_right = right_ps.getValue()
-    target_left = current_left + rotation
-    target_right = current_right + rotation
+def get_dynamic_speeds(base_speed):
+    vals = compass.getValues()
+    cur_h = math.atan2(vals[0], vals[1])
+    rel_angle = normalize_angle(cur_h - initial_heading)
+    multiples = [0.0, math.pi/2, math.pi, -math.pi/2, -math.pi]
+    target_angle_rel = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
+    angle_error = normalize_angle(rel_angle - target_angle_rel)
+    
+    Kp_compass = 4.0
+    steering_compass = Kp_compass * angle_error
+    
+    ranges = lidar.getRangeImage()
+    steering_lidar = 0.0
+    
+    if ranges:
+        N = len(ranges)
+        f = N / 360
+        s_left = ranges[int(80*f) : int(100*f)]
+        s_right = ranges[int(260*f) : int(280*f)]
+        d_left = get_avg_dist(s_left)
+        d_right = get_avg_dist(s_right)
+        
+        wall_threshold = 0.22 
+        ideal_dist = 0.125
+        Kp_lidar = 6.0
+        
+        if not math.isinf(d_left) and d_left < wall_threshold:
+            steering_lidar = Kp_lidar * (ideal_dist - d_left)
+        elif not math.isinf(d_right) and d_right < wall_threshold:
+            steering_lidar = Kp_lidar * (d_right - ideal_dist)
+
+    total_steering = steering_compass + steering_lidar
+    left_speed = base_speed + total_steering
+    right_speed = base_speed - total_steering
+    
+    max_spd = 6.28
+    left_speed = max(-max_spd, min(max_spd, left_speed))
+    right_speed = max(-max_spd, min(max_spd, right_speed))
+    
+    return left_speed, right_speed
+
+def move_distance(distance, speed=2.0):
+    rotation      = distance / wheel_radius
+    target_left   = left_ps.getValue()  + rotation
+    target_right  = right_ps.getValue() + rotation
     vel = abs(speed)
     left_motor.setVelocity(vel)
     right_motor.setVelocity(vel)
     left_motor.setPosition(target_left)
     right_motor.setPosition(target_right)
     while True:
-        if robot.step(timestep_ms) == -1:
-            return
-        if abs(left_ps.getValue() - target_left) < 0.01 and abs(right_ps.getValue() - target_right) < 0.01:
+        if robot.step(timestep_ms) == -1: return
+        if (abs(left_ps.getValue()  - target_left)  < 0.01 and
+                abs(right_ps.getValue() - target_right) < 0.01):
             break
     left_motor.setVelocity(0.0)
     right_motor.setVelocity(0.0)
@@ -151,421 +321,479 @@ def move_distance(distance: float, speed: float = 2.0) -> None:
     left_motor.setPosition(float('inf'))
     right_motor.setPosition(float('inf'))
 
-def normalize_angle(angle: float) -> float:
-    while angle > math.pi:
-        angle -= 2 * math.pi
-    while angle < -math.pi:
-        angle += 2 * math.pi
-    return angle
-
-def turn_left_90(correct: bool = True, tolerance: float = 0.05) -> None:
-    vals = compass.getValues()
-    current_heading = math.atan2(vals[0], vals[1])
-    target_heading = normalize_angle(current_heading + math.pi / 2)
-    left_motor.setVelocity(-2.0)
-    right_motor.setVelocity(2.0)
+def _snap_heading(tolerance=0.05):
+    """Dynamically corrects orientation to the nearest 90-degree axis without spinning."""
     while True:
-        if robot.step(timestep_ms) == -1:
-            break
+        if robot.step(timestep_ms) == -1: break
+        
         vals = compass.getValues()
-        heading = math.atan2(vals[0], vals[1])
-        error = normalize_angle(heading - target_heading)
-        if abs(error) < tolerance:
-            break
-    left_motor.setVelocity(0.0)
-    right_motor.setVelocity(0.0)
-    if correct:
-        robot.step(timestep_ms)
-        vals = compass.getValues()
-        current_heading = math.atan2(vals[0], vals[1])
-        rel_angle = normalize_angle(current_heading - initial_heading)
+        cur_h = math.atan2(vals[0], vals[1])
+        rel_angle = normalize_angle(cur_h - initial_heading)
         multiples = [0.0, math.pi/2, math.pi, -math.pi/2, -math.pi]
         closest = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
         offset = normalize_angle(rel_angle - closest)
-        if abs(offset) > tolerance:
-            correction_speed = 0.8 if offset > 0 else -0.8
-            left_motor.setVelocity(-correction_speed)
-            right_motor.setVelocity(correction_speed)
-            while True:
-                if robot.step(timestep_ms) == -1:
-                    break
-                vals = compass.getValues()
-                current_heading = math.atan2(vals[0], vals[1])
-                rel_angle = normalize_angle(current_heading - initial_heading)
-                offset = normalize_angle(rel_angle - closest)
-                if abs(offset) < tolerance:
-                    break
-            left_motor.setVelocity(0.0)
-            right_motor.setVelocity(0.0)
 
-def turn_right_90(correct: bool = True, tolerance: float = 0.05) -> None:
-    vals = compass.getValues()
-    current_heading = math.atan2(vals[0], vals[1])
-    target_heading = normalize_angle(current_heading - math.pi / 2)
-    left_motor.setVelocity(2.0)
-    right_motor.setVelocity(-2.0)
-    while True:
-        if robot.step(timestep_ms) == -1:
+        # If we are inside the tolerance window, stop the motors and exit!
+        if abs(offset) <= tolerance:
             break
-        vals = compass.getValues()
-        heading = math.atan2(vals[0], vals[1])
-        error = normalize_angle(heading - target_heading)
-        if abs(error) < tolerance:
-            break
+
+        # DYNAMIC STEERING: We update motor direction INSIDE the loop. 
+        # If it overshoots, it instantly reverses the motors to catch itself.
+        if offset > 0:
+            left_motor.setVelocity(0.8)
+            right_motor.setVelocity(-0.8)
+        else:
+            left_motor.setVelocity(-0.8)
+            right_motor.setVelocity(0.8)
+
     left_motor.setVelocity(0.0)
     right_motor.setVelocity(0.0)
+
+
+def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
+    global turn_counter
+    print(f"[TURN] Left 90° | Trigger: {reason}")
+    turn_counter += 1
+    if turn_counter >= 5:
+        adjust_to_wall()
+        turn_counter = 0
+        
+    vals           = compass.getValues()
+    cur_h          = math.atan2(vals[0], vals[1])
+    target_heading = normalize_angle(cur_h + math.pi / 2) # Original, correct math
+    
+    left_motor.setVelocity(-speed)
+    right_motor.setVelocity( speed)
+    
+    while True:
+        if robot.step(timestep_ms) == -1: break
+        vals  = compass.getValues()
+        h     = math.atan2(vals[0], vals[1])
+        error = normalize_angle(h - target_heading)
+        if abs(error) < tolerance: break
+        
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    
     if correct:
         robot.step(timestep_ms)
-        vals = compass.getValues()
-        current_heading = math.atan2(vals[0], vals[1])
-        rel_angle = normalize_angle(current_heading - initial_heading)
-        multiples = [0.0, math.pi/2, math.pi, -math.pi/2, -math.pi]
-        closest = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
-        offset = normalize_angle(rel_angle - closest)
-        if abs(offset) > tolerance:
-            correction_speed = 0.8 if offset > 0 else -0.8
-            left_motor.setVelocity(correction_speed)
-            right_motor.setVelocity(-correction_speed)
-            while True:
-                if robot.step(timestep_ms) == -1:
-                    break
-                vals = compass.getValues()
-                current_heading = math.atan2(vals[0], vals[1])
-                rel_angle = normalize_angle(current_heading - initial_heading)
-                offset = normalize_angle(rel_angle - closest)
-                if abs(offset) < tolerance:
-                    break
-            left_motor.setVelocity(0.0)
-            right_motor.setVelocity(0.0)
+        _snap_heading(tolerance)
+    
 
-def move_forward_tiles(num_tiles: int, speed: float = 3.0) -> None:
+def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
+    global turn_counter
+    print(f"[TURN] Right 90° | Trigger: {reason}")
+    turn_counter += 1
+    if turn_counter >= 5:
+        adjust_to_wall()
+        turn_counter = 0
+        
+    vals           = compass.getValues()
+    cur_h          = math.atan2(vals[0], vals[1])
+    target_heading = normalize_angle(cur_h - math.pi / 2) # Original, correct math
+    
+    left_motor.setVelocity( speed)
+    right_motor.setVelocity(-speed)
+    
+    while True:
+        if robot.step(timestep_ms) == -1: break
+        vals  = compass.getValues()
+        h     = math.atan2(vals[0], vals[1])
+        error = normalize_angle(h - target_heading)
+        if abs(error) < tolerance: break
+        
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    
+    if correct:
+        robot.step(timestep_ms)
+        _snap_heading(tolerance)
+
+
+def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
+    global turn_counter
+    print(f"[TURN] 180° | Trigger: {reason}")
+    turn_counter += 1
+    if turn_counter >= 5:
+        adjust_to_wall()
+        turn_counter = 0
+        
+    vals           = compass.getValues()
+    cur_h          = math.atan2(vals[0], vals[1])
+    target_heading = normalize_angle(cur_h + math.pi) 
+    
+    left_motor.setVelocity(-speed)
+    right_motor.setVelocity( speed)
+    
+    while True:
+        if robot.step(timestep_ms) == -1: break
+        vals  = compass.getValues()
+        h     = math.atan2(vals[0], vals[1])
+        error = normalize_angle(h - target_heading)
+        if abs(error) < tolerance: break
+        
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    
+    if correct:
+        robot.step(timestep_ms)
+        _snap_heading(tolerance)
+def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
+    global turn_counter
+    print(f"[TURN] 180° | Trigger: {reason}")
+    turn_counter += 1
+    if turn_counter >= 5:
+        adjust_to_wall()
+        turn_counter = 0
+        
+    vals           = compass.getValues()
+    cur_h          = math.atan2(vals[0], vals[1])
+    target_heading = normalize_angle(cur_h + math.pi) 
+    
+    left_motor.setVelocity(-speed)
+    right_motor.setVelocity( speed)
+    
+    while True:
+        if robot.step(timestep_ms) == -1: break
+        vals  = compass.getValues()
+        h     = math.atan2(vals[0], vals[1])
+        error = normalize_angle(h - target_heading)
+        if abs(error) < tolerance: break
+        
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+    
+    if correct:
+        robot.step(timestep_ms)
+        _snap_heading(tolerance)
+def turn_to_heading(target_h, speed=2.0, reason="Unknown"):
+    global current_heading
+    diff = (target_h - current_heading) % 4
+    if diff == 1:
+        turn_left_90(speed=speed, reason=reason)
+    elif diff == 2:
+        turn_180(speed=speed, reason=reason) 
+    elif diff == 3:
+        turn_right_90(speed=speed, reason=reason)
+    current_heading = target_h
+
+def move_forward_tiles(num_tiles, speed=3.0):
     steps_per_tile = steps_for_distance(tile_length, speed)
     for _ in range(num_tiles):
-        left_motor.setVelocity(speed)
-        right_motor.setVelocity(speed)
         for _ in range(steps_per_tile):
-            if robot.step(timestep_ms) == -1:
-                return
+            adj_left, adj_right = get_dynamic_speeds(speed)
+            left_motor.setVelocity(adj_left)
+            right_motor.setVelocity(adj_right)
+            if robot.step(timestep_ms) == -1: return
         left_motor.setVelocity(0.0)
         right_motor.setVelocity(0.0)
         robot.step(timestep_ms)
 
-def adjust_to_wall(target_distance: float = 0.128, tolerance: float = 0.02,
-                   check_wall: bool = True, wall_threshold: float = 0.3) -> None:
-    lidar.enable(timestep_ms)
-    robot.step(timestep_ms)
-    if check_wall:
-        ranges = lidar.getRangeImage()
-        if ranges:
-            center = len(ranges) // 2
-            front = ranges[center]
-            if math.isinf(front) or front > wall_threshold:
-                lidar.disable()
-                return
-    
-    max_speed = 1.5  
+def adjust_to_wall(target_distance=0.128, tolerance=0.02, wall_threshold=0.3):
+    ranges = lidar.getRangeImage()
+    if ranges:
+        N = len(ranges)
+        f = N / 360
+        s_front = ranges[int(170*f) : int(190*f)]
+        d = get_avg_dist(s_front)
+        if math.isinf(d) or d > wall_threshold: return
+        if d >= 0.09 and d <= 0.17: return
+
+    max_speed = 1.5
     min_speed = 0.2
     while True:
-        if robot.step(timestep_ms) == -1:
-            break
-        values = lidar.getRangeImage()
-        if not values:
-            continue
-        center = len(values) // 2
-        front = values[center]
-        if math.isinf(front):
-            break
+        if robot.step(timestep_ms) == -1: break
+        ranges = lidar.getRangeImage()
+        if not ranges: continue
+        N = len(ranges)
+        f = N / 360
+        s_front = ranges[int(170*f) : int(190*f)]
+        front   = get_avg_dist(s_front)
+        if math.isinf(front): break
         error = front - target_distance
-        if abs(error) <= tolerance:
-            break
+        if abs(error) <= tolerance: break
         speed = max(min_speed, min(max_speed, abs(error) * 5))
         if error > 0:
-            left_motor.setVelocity(speed)
-            right_motor.setVelocity(speed)
+            left_motor.setVelocity( speed)
+            right_motor.setVelocity( speed)
         else:
             left_motor.setVelocity(-speed)
             right_motor.setVelocity(-speed)
     left_motor.setVelocity(0.0)
     right_motor.setVelocity(0.0)
-    lidar.disable()
 
-def adjust_to_side_wall(wall_threshold: float = 0.25) -> None:
-    turn_left_90(correct=True)
-    if check_wall_ahead(threshold=wall_threshold):
-        adjust_to_wall()
-        turn_right_90(correct=True)
-        return
-
-    turn_right_90(correct=True)
-    turn_right_90(correct=True)
-    if check_wall_ahead(threshold=wall_threshold):
-        adjust_to_wall()
-        turn_left_90(correct=True)
-        return
-        
-    turn_left_90(correct=True)
-
-#----------------------------------------------
-# Navigation Primitives
-#----------------------------------------------
-def turn_to_heading(target_h: int):
-    global current_heading
-    diff = (target_h - current_heading) % 4
-    
-    if diff == 1:
-        turn_left_90()
-    elif diff == 2:
-        turn_left_90()
-        turn_left_90()
-    elif diff == 3:
-        turn_right_90()
-        
-    current_heading = target_h
-
-def check_wall_ahead(threshold: float = 0.18) -> bool:
-    lidar.enable(timestep_ms)
     robot.step(timestep_ms)
     ranges = lidar.getRangeImage()
-    lidar.disable()
-    
-    if ranges:
-        center = len(ranges) // 2
-        span = max(1, len(ranges) // 15) 
-        front_rays = ranges[center - span : center + span]
-        
-        valid_rays = [r for r in front_rays if not math.isinf(r)]
-        if valid_rays:
-            min_dist = min(valid_rays)
-            if min_dist < threshold:
-                return True
-    return False
+    if not ranges: return
+    N = len(ranges)
+    f = N / 360
+    s_left = ranges[int(80*f) : int(100*f)]
+    s_right = ranges[int(260*f) : int(280*f)]
+    d_left = get_avg_dist(s_left)
+    d_right = get_avg_dist(s_right)
 
-def navigate_to_target(target_x, target_y):
-    global current_x, current_y, current_heading
-    straight_tiles_count = 0
-    
-    while (current_x, current_y) != (target_x, target_y):
-        # Use breadth‑first search to compute a shortest path under
-        # currently known maze walls. BFS treats each step as having
-        # equal cost and naturally performs a flood fill outwards
-        # from the starting point. Compared to A*, BFS does not
-        # require a heuristic and is guaranteed to find the shortest
-        # path in terms of number of tiles.
-        path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
-        
-        if not path or len(path) < 2:
-            return False
-            
-        next_node = path[1]
-        target_h = get_target_heading((current_x, current_y), next_node)
-        
-        if target_h != current_heading:
-            turn_to_heading(target_h)
-            straight_tiles_count = 0 
-            
-        if check_wall_ahead():
-            adjust_to_wall()
-            blocked_boundary = get_wall_id((current_x, current_y), next_node)
-            known_walls.add(blocked_boundary)
-            straight_tiles_count = 0 
-            continue 
-            
-        move_forward_tiles(1)
-        current_x, current_y = next_node
-        straight_tiles_count += 1
-        
-        if straight_tiles_count >= 4:
-            adjust_to_side_wall()
-            straight_tiles_count = 0 
-            
-    print(f"Reached coordinate: ({target_x}, {target_y})")
-    return True
+    side_aligned = False
+    if not math.isinf(d_left) and d_left < wall_threshold:
+        turn_left_90(correct=False, reason="Facing Left side-wall to correct drift")
+        _adjust_to_side(target_distance, tolerance, wall_threshold)
+        turn_right_90(correct=False, reason="Returning to path after Left side-wall alignment")
+        side_aligned = True
+    elif not math.isinf(d_right) and d_right < wall_threshold:
+        turn_right_90(correct=False, reason="Facing Right side-wall to correct drift")
+        _adjust_to_side(target_distance, tolerance, wall_threshold)
+        turn_left_90(correct=False, reason="Returning to path after Right side-wall alignment")
+        side_aligned = True
+
+def _adjust_to_side(target_distance=0.128, tolerance=0.02, wall_threshold=0.3):
+    max_speed = 1.5
+    min_speed = 0.2
+    while True:
+        if robot.step(timestep_ms) == -1: break
+        ranges = lidar.getRangeImage()
+        if not ranges: continue
+        N = len(ranges)
+        f = N / 360
+        s_front = ranges[int(170*f) : int(190*f)]
+        front   = get_avg_dist(s_front)
+        if math.isinf(front): break
+        error = front - target_distance
+        if abs(error) <= tolerance: break
+        speed = max(min_speed, min(max_speed, abs(error) * 5))
+        if error > 0:
+            left_motor.setVelocity( speed)
+            right_motor.setVelocity( speed)
+        else:
+            left_motor.setVelocity(-speed)
+            right_motor.setVelocity(-speed)
+    left_motor.setVelocity(0.0)
+    right_motor.setVelocity(0.0)
+
+def check_wall_ahead(threshold=0.18):
+    ranges = lidar.getRangeImage()
+    if not ranges: return False
+    N = len(ranges)
+    f = N / 360
+    wall_map = scan_8_walls(ranges, f, N)
+    s_front = ranges[int(170*f) : int(190*f)]
+    d_front = get_avg_dist(s_front)
+    return wall_map['front'] == "WALL" or (not math.isinf(d_front) and d_front < threshold)
 
 # -----------------------------------------------------------------------------
-# 4. MAIN EXECUTION
+# 7. NAVIGATION
 # -----------------------------------------------------------------------------
-
-current_x = 0
-current_y = 0
-current_heading = 0 
-known_walls = set() 
-
-def detect_final_wall_color() -> str:
-    cam.enable(timestep_ms)
-    robot.step(timestep_ms)
-    robot.step(timestep_ms) 
-    
-    raw = cam.getImage()
-    cam.disable()
-    
-    if not raw: return "Unknown"
-    
-    img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
-    h, w = img.shape[:2]
-    
-    center_patch = img[h//2-10:h//2+10, w//2-10:w//2+10]
-    mean_color = cv2.mean(center_patch)
-    b, g, r = mean_color[0], mean_color[1], mean_color[2]
-    
-    if max(r, g, b) < 60: return "Black"
-    elif r > g and r > b: return "Red"
-    elif g > r and g > b: return "Green"
-    elif b > r and b > g: return "Blue"
-        
-    return "Unknown"
-
-def get_wall_id(node_a, node_b):
-    return tuple(sorted([node_a, node_b]))
-
-def get_heuristic(node, target):
-    return abs(node[0] - target[0]) + abs(node[1] - target[1])
-
-def get_shortest_path_astar(start, target, grid_size=12):
-    """
-    Finds the shortest path on a grid using the A* algorithm. This function
-    remains available for reference but is no longer used by the navigation
-    routine. It has been superseded by a breadth‑first search (BFS) flood
-    fill implementation below. The algorithm treats the grid as unweighted
-    and respects the set of known walls maintained during exploration.
-
-    Args:
-        start (tuple[int, int]): starting coordinate (x, y).
-        target (tuple[int, int]): target coordinate (x, y).
-        grid_size (int): size of the grid in each dimension.
-
-    Returns:
-        list[tuple[int, int]] | None: list of coordinates from start to
-        target (inclusive) or None if no path exists.
-    """
-    # Priority queue holds tuples of (f_score, g_score, node, path)
-    queue = [(get_heuristic(start, target), 0, start, [start])]
-    # Track the best known cost to reach each node
-    visited_costs = {start: 0}
-    
-    while queue:
-        f, g, current_node, path = heapq.heappop(queue)
-        if current_node == target:
-            return path
-        
-        # Explore neighbours (up, right, down, left)
-        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            next_node = (current_node[0] + dx, current_node[1] + dy)
-            # Ignore nodes outside grid bounds
-            if not (0 <= next_node[0] < grid_size and 0 <= next_node[1] < grid_size):
-                continue
-            
-            wall_boundary = get_wall_id(current_node, next_node)
-            # Skip if a wall is known between these cells
-            if wall_boundary in known_walls:
-                continue
-            
-            new_g = g + 1
-            # Only add to queue if we've found a cheaper way to this node
-            if next_node not in visited_costs or new_g < visited_costs[next_node]:
-                visited_costs[next_node] = new_g
-                new_f = new_g + get_heuristic(next_node, target)
-                heapq.heappush(queue, (new_f, new_g, next_node, path + [next_node]))
-                
-    return None
-
 
 def get_shortest_path_bfs(start, target, grid_size=12):
-    """
-    Compute the shortest path between two grid coordinates using a
-    breadth‑first search (BFS) flood fill approach. BFS expands outwards
-    uniformly from the starting cell, ensuring that the first time the
-    target is reached the path found is the shortest in terms of number
-    of steps. Known walls are treated as impassable obstacles.
-
-    Args:
-        start (tuple[int, int]): starting coordinate (x, y) on the grid.
-        target (tuple[int, int]): target coordinate (x, y) on the grid.
-        grid_size (int): size of the (square) grid; valid x and y are
-            in the range [0, grid_size ‑ 1].
-
-    Returns:
-        list[tuple[int, int]] | None: list of coordinates from start to
-        target (inclusive) describing the shortest path, or None if no
-        path exists due to walls or unreachable area.
-    """
     from collections import deque
-    
-    if start == target:
-        return [start]
-    
-    # Maintain a queue of (node, path_to_node)
-    queue = deque([(start, [start])])
-    # Track visited cells to prevent revisiting them
+    if start == target: return [start]
+    queue   = deque([(start, [start])])
     visited = {start}
-    
     while queue:
-        current_node, path = queue.popleft()
-        # Explore neighbours in four cardinal directions
+        node, path = queue.popleft()
         for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            next_node = (current_node[0] + dx, current_node[1] + dy)
-            # Ensure the neighbour is within grid bounds
-            if not (0 <= next_node[0] < grid_size and 0 <= next_node[1] < grid_size):
-                continue
-            # Check if there's a known wall between the current cell and this neighbour
-            wall_boundary = get_wall_id(current_node, next_node)
-            if wall_boundary in known_walls:
-                continue
-            # Skip already visited cells
-            if next_node in visited:
-                continue
-            new_path = path + [next_node]
-            # If this is the target, return the completed path
-            if next_node == target:
-                return new_path
-            visited.add(next_node)
-            queue.append((next_node, new_path))
-    # No path found
+            nxt = (node[0] + dx, node[1] + dy)
+            if not (0 <= nxt[0] < grid_size and 0 <= nxt[1] < grid_size): continue
+            if get_wall_id(node, nxt) in known_walls: continue
+            if nxt in visited: continue
+            new_path = path + [nxt]
+            if nxt == target: return new_path
+            visited.add(nxt)
+            queue.append((nxt, new_path))
     return None
 
 def get_target_heading(current_node, next_node):
     dx = next_node[0] - current_node[0]
     dy = next_node[1] - current_node[1]
-    
-    if dy == 1: return 0  
-    if dx == 1: return 1  
-    if dy == -1: return 2 
-    if dx == -1: return 3 
+    if dy ==  1: return 0  
+    if dx ==  1: return 1   
+    if dy == -1: return 2   
+    if dx == -1: return 3   
     return 0
 
-def main() -> None:
-    global current_x, current_y
-    
-    robot.step(timestep_ms) 
-    
-    while(not check_wall_ahead()):
+def navigate_to_target(target_x, target_y):
+    global current_x, current_y, current_heading
+    straight_tiles_count = 0
+    current_path = [] # Gives the robot memory of its planned route
+
+    while (current_x, current_y) != (target_x, target_y):
+        scan_and_register_walls()
+
+        # --- DYNAMIC COLUMN-BASED CAMERA TRIGGER ---
+        if current_x == target_x and (current_y - target_y) in [3, 2, 1, 0, -1, -2, -3]:
+            toggle_camera(True)
+            
+            distance_to_tag = abs(target_y - current_y)
+            if distance_to_tag <= 1:
+                res = check_camera_quick()
+                
+                if res:
+                    print(">>> Tag detected in the target column!")
+                    if distance_to_tag == 0:
+                        print(">>> Result: Robot is exactly on the target tile. This is the ACTUAL tag.")
+                    else:
+                        print(f">>> Result: Tag detected safely from {distance_to_tag} tile away.")
+                    
+                    toggle_camera(False)
+                    return True, res
+        else:
+            toggle_camera(False)
+
+        # --- SMART PATH CACHING ---
+        recalculate = True
+        
+        # If we already have a path planned out...
+        if current_path and len(current_path) > 1:
+            # Sync the planned path with our current position
+            if (current_x, current_y) in current_path:
+                idx = current_path.index((current_x, current_y))
+                current_path = current_path[idx:] # Slice off the tiles we already passed
+                
+                # Check if any segment of our remaining planned path is blocked by a known wall
+                if len(current_path) > 1:
+                    blocked = False
+                    for i in range(len(current_path) - 1):
+                        if get_wall_id(current_path[i], current_path[i+1]) in known_walls:
+                            blocked = True
+                            break
+                            
+                    # If the path is perfectly clear, stick to it! Don't recalculate.
+                    if not blocked:
+                        recalculate = False
+
+        if recalculate:
+            current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+            if not current_path or len(current_path) < 2:
+                return False, None
+
+        next_node = current_path[1]
+        target_h  = get_target_heading((current_x, current_y), next_node)
+
+        if target_h != current_heading:
+            turn_to_heading(target_h, reason=f"BFS Path Correction (Heading to {target_h})")
+            straight_tiles_count = 0
+
+        # If a wall suddenly pops up in front of us, add it to memory and FORCE a recalculate
+        if check_wall_ahead():
+            print(f"[BLOCKED] Wall detected ahead! Recalculating route...")
+            adjust_to_wall()
+            known_walls.add(get_wall_id((current_x, current_y), next_node))
+            straight_tiles_count = 0
+            current_path = [] # Trash the blocked path
+            continue
+
+        # --- LOG AND EXECUTE THE MOVE ---
+        print(f"[MOVE] Forward 1 tile: ({current_x}, {current_y}) -> ({next_node[0]}, {next_node[1]})")
         move_forward_tiles(1)
-        current_y += 1 
+        current_x, current_y = next_node
+        straight_tiles_count += 1
+
+    toggle_camera(True)
+    print(f"Reached coordinate: ({target_x}, {target_y})")
+    return True, None
+# -----------------------------------------------------------------------------
+# 8. FINAL DETECTION & MESSAGING
+# -----------------------------------------------------------------------------
+
+def detect_final_wall_color():
+    print("\n[COLOR SCAN] Starting Final Wall Color Detection...")
+    toggle_camera(True)
     
+    wall_map = get_wall_map()
+    offsets = {'front': 0, 'left': 1, 'right': 3, 'back': 2}
+    start_heading = current_heading
+
+    for sensor, offset in offsets.items():
+        if wall_map.get(sensor) == "WALL":
+            target_h = (start_heading + offset) % 4
+            
+            # Spin to face the wall
+            if target_h != current_heading:
+                turn_to_heading(target_h, speed=6.28, reason=f"Scanning {sensor} wall for Color")
+
+            # Wait 4 steps to let the camera focus and render the lighting properly
+            for _ in range(4):
+                robot.step(timestep_ms)
+
+            raw = cam.getImage()
+            if raw:
+                img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
+                h, w = img.shape[:2]
+                patch = img[h//2-10:h//2+10, w//2-10:w//2+10]
+                b, g, r, _ = cv2.mean(patch)
+
+                print(f"[COLOR TEST] {sensor} wall -> R:{r:.1f} G:{g:.1f} B:{b:.1f}")
+
+                # 1. Black Check (All channels must be very dark)
+                if r < 60 and g < 60 and b < 60:
+                    toggle_camera(False)
+                    return "Black"
+
+                # 2. Dominant Color Checks 
+                # (The color must be bright, AND significantly higher than the other channels to ignore white/gray)
+                if r > 90 and r > g + 35 and r > b + 35:
+                    toggle_camera(False)
+                    return "Red"
+                    
+                if g > 90 and g > r + 35 and g > b + 35:
+                    toggle_camera(False)
+                    return "Green"
+                    
+                if b > 90 and b > r + 35 and b > g + 35:
+                    toggle_camera(False)
+                    return "Blue"
+
+    # Turn off camera if we somehow fail
+    toggle_camera(False)
+    return "Unknown"
+
+# -----------------------------------------------------------------------------
+# 9. GLOBAL STATE & MAIN
+# -----------------------------------------------------------------------------
+
+current_x       = 0
+current_y       = 0
+current_heading = 0   
+known_walls     = set()
+
+
+def main():
+    global current_x, current_y
+
+    robot.step(timestep_ms)
+
+    while not check_wall_ahead():
+        move_forward_tiles(1)
+        current_y += 1
+        scan_and_register_walls()
+
     adjust_to_wall()
-    
+    next_tag_data = None 
+
     while robot.step(timestep_ms) != -1:
         
-        x, y, tag_id, binary_str = scan_aruco_tag()
-        
+        if next_tag_data is None:
+            x, y, tag_id, binary_str = scan_aruco_tag()
+        else:
+            x, y, tag_id, binary_str = next_tag_data
+            next_tag_data = None 
+
         if tag_id is not None:
-            print(f"Decoded (X, Y) Coordinates: ({x}, {y})")
+            print(f"Valid Tag Found! Decoded (X, Y): ({x}, {y})")
+            toggle_camera(False) 
             
-            if x == current_x and y == current_y:
-                break
+            success, early_tag = navigate_to_target(x, y)
+            
+            if early_tag:
+                next_tag_data = early_tag
                 
-            success = navigate_to_target(x, y)
             if not success:
-                break 
-                
+                break
         else:
             break
-            
+
     color = detect_final_wall_color()
     print(f"Final Wall Color: {color}")
     send_message(color)
-    print("Time taken:", robot.getTime())
-    
-
+    print("Time taken:", robot.getTime()/60)
 
 if __name__ == '__main__':
     main()
