@@ -345,7 +345,13 @@ def navigate_to_target(target_x, target_y):
     straight_tiles_count = 0
     
     while (current_x, current_y) != (target_x, target_y):
-        path = get_shortest_path_astar((current_x, current_y), (target_x, target_y))
+        # Use breadth‑first search to compute a shortest path under
+        # currently known maze walls. BFS treats each step as having
+        # equal cost and naturally performs a flood fill outwards
+        # from the starting point. Compared to A*, BFS does not
+        # require a heuristic and is guaranteed to find the shortest
+        # path in terms of number of tiles.
+        path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
         
         if not path or len(path) < 2:
             return False
@@ -415,30 +421,106 @@ def get_heuristic(node, target):
     return abs(node[0] - target[0]) + abs(node[1] - target[1])
 
 def get_shortest_path_astar(start, target, grid_size=12):
+    """
+    Finds the shortest path on a grid using the A* algorithm. This function
+    remains available for reference but is no longer used by the navigation
+    routine. It has been superseded by a breadth‑first search (BFS) flood
+    fill implementation below. The algorithm treats the grid as unweighted
+    and respects the set of known walls maintained during exploration.
+
+    Args:
+        start (tuple[int, int]): starting coordinate (x, y).
+        target (tuple[int, int]): target coordinate (x, y).
+        grid_size (int): size of the grid in each dimension.
+
+    Returns:
+        list[tuple[int, int]] | None: list of coordinates from start to
+        target (inclusive) or None if no path exists.
+    """
+    # Priority queue holds tuples of (f_score, g_score, node, path)
     queue = [(get_heuristic(start, target), 0, start, [start])]
+    # Track the best known cost to reach each node
     visited_costs = {start: 0}
     
     while queue:
         f, g, current_node, path = heapq.heappop(queue)
         if current_node == target:
             return path
-            
+        
+        # Explore neighbours (up, right, down, left)
         for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
             next_node = (current_node[0] + dx, current_node[1] + dy)
+            # Ignore nodes outside grid bounds
             if not (0 <= next_node[0] < grid_size and 0 <= next_node[1] < grid_size):
                 continue
-                
+            
             wall_boundary = get_wall_id(current_node, next_node)
+            # Skip if a wall is known between these cells
             if wall_boundary in known_walls:
                 continue
-                
+            
             new_g = g + 1
+            # Only add to queue if we've found a cheaper way to this node
             if next_node not in visited_costs or new_g < visited_costs[next_node]:
                 visited_costs[next_node] = new_g
                 new_f = new_g + get_heuristic(next_node, target)
                 heapq.heappush(queue, (new_f, new_g, next_node, path + [next_node]))
                 
-    return None 
+    return None
+
+
+def get_shortest_path_bfs(start, target, grid_size=12):
+    """
+    Compute the shortest path between two grid coordinates using a
+    breadth‑first search (BFS) flood fill approach. BFS expands outwards
+    uniformly from the starting cell, ensuring that the first time the
+    target is reached the path found is the shortest in terms of number
+    of steps. Known walls are treated as impassable obstacles.
+
+    Args:
+        start (tuple[int, int]): starting coordinate (x, y) on the grid.
+        target (tuple[int, int]): target coordinate (x, y) on the grid.
+        grid_size (int): size of the (square) grid; valid x and y are
+            in the range [0, grid_size ‑ 1].
+
+    Returns:
+        list[tuple[int, int]] | None: list of coordinates from start to
+        target (inclusive) describing the shortest path, or None if no
+        path exists due to walls or unreachable area.
+    """
+    from collections import deque
+    
+    if start == target:
+        return [start]
+    
+    # Maintain a queue of (node, path_to_node)
+    queue = deque([(start, [start])])
+    # Track visited cells to prevent revisiting them
+    visited = {start}
+    
+    while queue:
+        current_node, path = queue.popleft()
+        # Explore neighbours in four cardinal directions
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            next_node = (current_node[0] + dx, current_node[1] + dy)
+            # Ensure the neighbour is within grid bounds
+            if not (0 <= next_node[0] < grid_size and 0 <= next_node[1] < grid_size):
+                continue
+            # Check if there's a known wall between the current cell and this neighbour
+            wall_boundary = get_wall_id(current_node, next_node)
+            if wall_boundary in known_walls:
+                continue
+            # Skip already visited cells
+            if next_node in visited:
+                continue
+            new_path = path + [next_node]
+            # If this is the target, return the completed path
+            if next_node == target:
+                return new_path
+            visited.add(next_node)
+            queue.append((next_node, new_path))
+    # No path found
+    return None
 
 def get_target_heading(current_node, next_node):
     dx = next_node[0] - current_node[0]
@@ -481,6 +563,8 @@ def main() -> None:
     color = detect_final_wall_color()
     print(f"Final Wall Color: {color}")
     send_message(color)
+    print("Time taken:", robot.getTime())
+    
 
 
 if __name__ == '__main__':
