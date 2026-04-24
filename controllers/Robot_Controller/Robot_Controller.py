@@ -137,6 +137,86 @@ def scan_and_register_walls():
 # -----------------------------------------------------------------------------
 # 3. HELPER UTILITIES
 # -----------------------------------------------------------------------------
+def is_on_perimeter(x, y, grid_size=12):
+    """Strictly hardcoded check to ensure 0 and 15 are recognized as outer walls."""
+    print(f"Checking perimeter for ({x}, {y})")
+    return x == 0 or x == 11 or y == 0 or y == 11
+
+def is_dead_end(start_node, target_node, avoid_node, grid_size=12):
+    """
+    Rule Check: Does this path lead to a trap?
+    Runs a test scan to the target, but is FORBIDDEN from stepping backward onto 'avoid_node'.
+    """
+    from collections import deque
+    queue = deque([start_node])
+    visited = {start_node, avoid_node} 
+    
+    while queue:
+        node = queue.popleft()
+        if node == target_node:
+            return False # We found a valid path, it's not a dead end!
+            
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nxt = (node[0] + dx, node[1] + dy)
+            if not (0 <= nxt[0] < grid_size and 0 <= nxt[1] < grid_size): continue
+            if get_wall_id(node, nxt) in known_walls: continue
+            if nxt in visited: continue
+            
+            visited.add(nxt)
+            queue.append(nxt)
+            
+    return True # Exhausted all options to reach the target. It's a dead end.
+
+def get_rule_based_next_node(current, target, grid_size=12):
+    global perimeter_mode
+    
+    # 1. STATE: RE-ENGAGE RULES IF WE TOUCH THE OUTER WALL
+    if is_on_perimeter(current[0], current[1], grid_size):
+        if not perimeter_mode:
+            print(f"[RULE ENGINE] Reached outer wall at ({current[0]}, {current[1]}). Engaging rules.")
+            perimeter_mode = True
+    else:
+        # 2. STATE: OFF-PERIMETER (Rule Released)
+        # The Magnet Fix: Actively try to step back onto the outer wall
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            nxt = (current[0] + dx, current[1] + dy)
+            if not (0 <= nxt[0] < grid_size and 0 <= nxt[1] < grid_size): continue
+            
+            if is_on_perimeter(nxt[0], nxt[1], grid_size) and nxt not in historically_visited:
+                if get_wall_id(current, nxt) not in known_walls:
+                    return nxt
+                    
+        path = get_shortest_path_bfs(current, target, grid_size)
+        return path[1] if path and len(path) > 1 else None
+
+    # 3. STATE: ON PERIMETER & RULES ENGAGED
+    valid_perimeter_moves = []
+    for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+        nxt = (current[0] + dx, current[1] + dy)
+        if not (0 <= nxt[0] < grid_size and 0 <= nxt[1] < grid_size): continue
+        
+        # Obey physical walls
+        if get_wall_id(current, nxt) in known_walls: continue
+        
+        if is_on_perimeter(nxt[0], nxt[1], grid_size):
+            if nxt not in historically_visited:
+                if not is_dead_end(start_node=nxt, target_node=target, avoid_node=current, grid_size=grid_size):
+                    valid_perimeter_moves.append(nxt)
+            
+    if valid_perimeter_moves:
+        if len(valid_perimeter_moves) > 1:
+            bfs_path = get_shortest_path_bfs(current, target, grid_size)
+            if bfs_path and len(bfs_path) > 1 and bfs_path[1] in valid_perimeter_moves:
+                return bfs_path[1]
+        return valid_perimeter_moves[0]
+
+    # 4. TRIGGER: PERIMETER BLOCKED
+    # Added the coordinate to the print so you can see exactly where it gets trapped
+    print(f"[RULE ENGINE] Perimeter blocked at ({current[0]}, {current[1]})! Releasing rules to move inward.")
+    perimeter_mode = False
+    
+    path = get_shortest_path_bfs(current, target, grid_size)
+    return path[1] if path and len(path) > 1 else None
 
 def steps_for_distance(distance, angular_speed):
     linear_speed = abs(angular_speed) * wheel_radius
@@ -163,8 +243,8 @@ aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 parameters = cv2.aruco.DetectorParameters()
 detector   = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
-def check_camera_quick():
-    """Checks the camera continuously. Filters out glitch readings and known tags."""
+def check_camera_quick(target_pos=None):
+    """Checks the camera continuously. Filters out glitch readings, known tags, and distant tags."""
     robot.step(timestep_ms)
     raw = cam.getImage()
     if not raw: return None
@@ -176,21 +256,35 @@ def check_camera_quick():
     if ids is not None:
         tag_id = int(ids[0][0])
         
+        # 1. Uniqueness Check
         if tag_id in processed_tags:
             return None
             
         x = (tag_id >> 4) & 0x0F
         y = tag_id & 0x0F
         
-        # Anti-Hallucination: If the coordinate is outside a 16x16 maze, ignore it.
-        if x >= 16 or y >= 16:
+        # 2. Anti-Hallucination Check
+        if x >= 12 or y >= 12:
             return None
 
+        # 3. NEW: 4-Tile Radius Check
+        # Only applies if the navigation loop passes in a target
+        if target_pos is not None:
+            # Calculate Euclidean distance between robot and the current target
+            dist_to_target = math.hypot(current_x - target_pos[0], current_y - target_pos[1])
+            
+            if dist_to_target > 4.0:
+                # Discard the tag, but DO NOT add it to processed_tags.
+                # This allows it to be re-detected once we enter the 4-tile radius.
+                return None
+
+        # Tag is fully valid! Add to memory and return.
         processed_tags.add(tag_id)
         binary_str = format(tag_id, '08b')
         return (x, y, tag_id, binary_str)
         
     return None
+
 
 def scan_aruco_tag(scan_distance=0.1):
     """
@@ -513,7 +607,7 @@ def check_wall_ahead(threshold=0.18):
 # 7. NAVIGATION
 # -----------------------------------------------------------------------------
 
-def get_shortest_path_bfs(start, target, grid_size=16, restrict_to_visited=False):
+def get_shortest_path_bfs(start, target, grid_size=12, restrict_to_visited=False):
     from collections import deque
     if start == target: return [start]
     queue   = deque([(start, [start])])
@@ -547,7 +641,6 @@ def get_target_heading(current_node, next_node):
 def navigate_to_target(target_x, target_y):
     global current_x, current_y, current_heading
     straight_tiles_count = 0
-    current_path = [] 
 
     while (current_x, current_y) != (target_x, target_y):
         scan_and_register_walls()
@@ -556,63 +649,36 @@ def navigate_to_target(target_x, target_y):
             return True, None
 
         # --- CONTINUOUS CAMERA SCANNING ---
-        # The camera is always on, and check_camera_quick() filters out known tags.
-        # If it returns data here, it's a completely NEW tag spotted in the distance!
-        res = check_camera_quick()
-        if res:
-            print(f">>> Early Tag detected mid-navigation! (X, Y): ({res[0]}, {res[1]})")
-            return True, res 
-
-        # --- SMART PATH CACHING & SAFE BACKTRACKING ---
-        recalculate = True
+        # --- CONTINUOUS CAMERA SCANNING ---
+        # Pass the target so the camera can enforce the 4-tile radius rule
+        res = check_camera_quick(target_pos=(target_x, target_y))
         
-        if current_path and len(current_path) > 1:
-            if (current_x, current_y) in current_path:
-                idx = current_path.index((current_x, current_y))
-                current_path = current_path[idx:] 
-                
-                if len(current_path) > 1:
-                    blocked = False
-                    for i in range(len(current_path) - 1):
-                        if get_wall_id(current_path[i], current_path[i+1]) in known_walls:
-                            blocked = True
-                            break
-                    if not blocked:
-                        recalculate = False
+        if res:
+            print(f">>> Early Tag validated within 4-tile radius! (X, Y): ({res[0]}, {res[1]})")
+            return True, res
 
-        if recalculate:
-            new_path = None
-            
-            # 1. Try Safe Backtracking ONLY if the exact target is in our history
-            if (target_x, target_y) in historically_visited:
-                new_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y), restrict_to_visited=True)
-            
-            # 2. If it's an unknown target, OR safe backtracking couldn't find a contiguous path, use Normal BFS
-            if not new_path or len(new_path) < 2:
-                new_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+        # --- DYNAMIC RULE-BASED DECISION ---
+        # Replaces the old BFS caching block. Asks the engine for the next legal move.
+        next_node = get_rule_based_next_node((current_x, current_y), (target_x, target_y))
+        
+        if not next_node:
+            print("[ERROR] No valid moves found by rule engine!")
+            return False, None
 
-            current_path = new_path
-
-            # 3. If still no path, abort
-            if not current_path or len(current_path) < 2:
-                return False, None
-
-        next_node = current_path[1]
         target_h  = get_target_heading((current_x, current_y), next_node)
 
         if target_h != current_heading:
-            turn_to_heading(target_h, reason=f"BFS Path Correction (Heading to {target_h})")
+            turn_to_heading(target_h, reason=f"Path Correction (Heading to {target_h})")
             straight_tiles_count = 0
 
+        # --- WALL COLLISION RECOVERY ---
         if check_wall_ahead():
-            print(f"[BLOCKED] Wall detected ahead! Recalculating route...")
+            print(f"[BLOCKED] Wall detected ahead! Registering and finding new rule-based move...")
             adjust_to_wall()
             known_walls.add(get_wall_id((current_x, current_y), next_node))
             straight_tiles_count = 0
-            current_path = [] 
-            continue
+            continue # Skip moving and let the loop query the rule engine again
 
-        
         move_forward_tiles(1)
         current_x, current_y = next_node
         
@@ -682,6 +748,7 @@ current_y       = 0
 current_heading = 0   
 known_walls     = set()
 historically_visited = {(0, 0)} # Memory of physically visited tiles
+perimeter_mode = True  # Tracks whether the outer-wall rule is currently active
 
 
 def main():
