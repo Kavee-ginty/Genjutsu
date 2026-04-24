@@ -291,8 +291,71 @@ def scan_aruco_tag(scan_distance=0.2):
     return None, None, None, None
 
 # -----------------------------------------------------------------------------
-# 5. MOVEMENT PRIMITIVES
+# 5. MOVEMENT PRIMITIVES & DRIFT CORRECTION
 # -----------------------------------------------------------------------------
+
+def get_dynamic_speeds(base_speed):
+    """
+    1. Uses Compass to lock onto the nearest cardinal angle (0, 90, 180, 270).
+    2. Uses Lidar to check ONE wall (Left preferred). If found, maintains 0.125m.
+    If the wall ends, the Lidar correction drops to 0, and the Compass seamlessly 
+    keeps the robot driving perfectly straight without swerving.
+    """
+    
+    # --- 1. COMPASS CORRECTION (Primary: Keeps robot parallel) ---
+    vals = compass.getValues()
+    cur_h = math.atan2(vals[0], vals[1])
+    rel_angle = normalize_angle(cur_h - initial_heading)
+    
+    # Snap to the closest cardinal direction (0, pi/2, pi, -pi/2)
+    multiples = [0.0, math.pi/2, math.pi, -math.pi/2, -math.pi]
+    target_angle_rel = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
+    
+    angle_error = normalize_angle(rel_angle - target_angle_rel)
+    
+    # Positive angle_error means robot is rotated too far Left. Need to steer Right.
+    Kp_compass = 4.0
+    steering_compass = Kp_compass * angle_error
+    
+    # --- 2. LIDAR CORRECTION (Secondary: Keeps 0.125m from one wall) ---
+    ranges = lidar.getRangeImage()
+    steering_lidar = 0.0
+    
+    if ranges:
+        N = len(ranges)
+        f = N / 360
+        s_left = ranges[int(80*f) : int(100*f)]
+        s_right = ranges[int(260*f) : int(280*f)]
+        
+        d_left = get_avg_dist(s_left)
+        d_right = get_avg_dist(s_right)
+        
+        wall_threshold = 0.22 # Must be a clear, close wall
+        ideal_dist = 0.125
+        Kp_lidar = 6.0
+        
+        # Only use ONE wall. Prefer Left.
+        if not math.isinf(d_left) and d_left < wall_threshold:
+            # Example: d_left is 0.15 (too far right). 0.125 - 0.15 = -0.025 (Steer Left)
+            steering_lidar = Kp_lidar * (ideal_dist - d_left)
+            
+        elif not math.isinf(d_right) and d_right < wall_threshold:
+            # Example: d_right is 0.15 (too far left). 0.15 - 0.125 = +0.025 (Steer Right)
+            steering_lidar = Kp_lidar * (d_right - ideal_dist)
+
+    # --- 3. COMBINE AND CLAMP ---
+    total_steering = steering_compass + steering_lidar
+    
+    # Positive steering = Steer Right (Left motor faster, Right motor slower)
+    left_speed = base_speed + total_steering
+    right_speed = base_speed - total_steering
+    
+    # Clamp to Webots physics limits to prevent motor errors
+    max_spd = 6.28
+    left_speed = max(-max_spd, min(max_spd, left_speed))
+    right_speed = max(-max_spd, min(max_spd, right_speed))
+    
+    return left_speed, right_speed
 
 def move_distance(distance, speed=2.0):
     rotation      = distance / wheel_radius
@@ -345,7 +408,7 @@ def turn_left_90(correct=True, tolerance=0.05):
     global turn_counter
     turn_counter += 1
     if turn_counter == 5:
-        print("5th turn, Performing wall adjustment to correct drift...")
+        # print("5th turn, Performing wall adjustment to correct drift...")
         adjust_to_wall()
         turn_counter = 0
     vals           = compass.getValues()
@@ -372,7 +435,7 @@ def turn_right_90(correct=True, tolerance=0.05):
     global turn_counter
     turn_counter += 1
     if turn_counter == 5:
-        print("5th turn, Performing wall adjustment to correct drift...")
+        # print("5th turn, Performing wall adjustment to correct drift...")
         adjust_to_wall()
         turn_counter = 0
     vals           = compass.getValues()
@@ -396,13 +459,23 @@ def turn_right_90(correct=True, tolerance=0.05):
 
 
 def move_forward_tiles(num_tiles, speed=3.0):
+    """
+    Moves forward while constantly checking Compass and Lidar 
+    to maintain a perfectly straight, centered trajectory.
+    """
     steps_per_tile = steps_for_distance(tile_length, speed)
     for _ in range(num_tiles):
-        left_motor.setVelocity(speed)
-        right_motor.setVelocity(speed)
         for _ in range(steps_per_tile):
+            
+            # Dynamically adjust speeds based on Compass and Lidar
+            adj_left, adj_right = get_dynamic_speeds(speed)
+            left_motor.setVelocity(adj_left)
+            right_motor.setVelocity(adj_right)
+            
             if robot.step(timestep_ms) == -1:
                 return
+                
+        # Stop cleanly at the end of the tile
         left_motor.setVelocity(0.0)
         right_motor.setVelocity(0.0)
         robot.step(timestep_ms)
@@ -639,10 +712,10 @@ def navigate_to_target(target_x, target_y):
         # --- register walls from the new tile immediately after moving ---
         scan_and_register_walls()
 
-        straight_tiles_count += 1
-        if straight_tiles_count >= 4:
-            adjust_to_side_wall()
-            straight_tiles_count = 0
+        # straight_tiles_count += 1
+        # if straight_tiles_count >= 6:
+        #     adjust_to_side_wall()
+        #     straight_tiles_count = 0
 
     print(f"Reached coordinate: ({target_x}, {target_y})")
     return True
