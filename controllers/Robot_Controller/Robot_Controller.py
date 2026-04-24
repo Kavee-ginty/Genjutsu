@@ -582,7 +582,7 @@ def check_wall_ahead(threshold=0.18):
 # 7. NAVIGATION
 # -----------------------------------------------------------------------------
 
-def get_shortest_path_bfs(start, target, grid_size=12):
+def get_shortest_path_bfs(start, target, grid_size=12, restrict_to_visited=False):
     from collections import deque
     if start == target: return [start]
     queue   = deque([(start, [start])])
@@ -592,6 +592,10 @@ def get_shortest_path_bfs(start, target, grid_size=12):
         for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
             nxt = (node[0] + dx, node[1] + dy)
             if not (0 <= nxt[0] < grid_size and 0 <= nxt[1] < grid_size): continue
+            
+            # --- SAFE BACKTRACKING FILTER ---
+            if restrict_to_visited and nxt not in historically_visited: continue
+            
             if get_wall_id(node, nxt) in known_walls: continue
             if nxt in visited: continue
             new_path = path + [nxt]
@@ -638,29 +642,33 @@ def navigate_to_target(target_x, target_y):
             toggle_camera(False)
 
         # --- SMART PATH CACHING ---
+        # --- SMART PATH CACHING & SAFE BACKTRACKING ---
         recalculate = True
         
-        # If we already have a path planned out...
         if current_path and len(current_path) > 1:
-            # Sync the planned path with our current position
             if (current_x, current_y) in current_path:
                 idx = current_path.index((current_x, current_y))
-                current_path = current_path[idx:] # Slice off the tiles we already passed
+                current_path = current_path[idx:] 
                 
-                # Check if any segment of our remaining planned path is blocked by a known wall
                 if len(current_path) > 1:
                     blocked = False
                     for i in range(len(current_path) - 1):
                         if get_wall_id(current_path[i], current_path[i+1]) in known_walls:
                             blocked = True
                             break
-                            
-                    # If the path is perfectly clear, stick to it! Don't recalculate.
                     if not blocked:
                         recalculate = False
 
         if recalculate:
-            current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+            # 1. Try Safe Backtracking First
+            if (target_x, target_y) in historically_visited:
+                current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y), restrict_to_visited=True)
+            
+            # 2. If it's an unknown target (or if the restricted path fails), use normal BFS
+            if not current_path or len(current_path) < 2:
+                current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+
+            # 3. If still no path, abort
             if not current_path or len(current_path) < 2:
                 return False, None
 
@@ -671,19 +679,21 @@ def navigate_to_target(target_x, target_y):
             turn_to_heading(target_h, reason=f"BFS Path Correction (Heading to {target_h})")
             straight_tiles_count = 0
 
-        # If a wall suddenly pops up in front of us, add it to memory and FORCE a recalculate
         if check_wall_ahead():
             print(f"[BLOCKED] Wall detected ahead! Recalculating route...")
             adjust_to_wall()
             known_walls.add(get_wall_id((current_x, current_y), next_node))
             straight_tiles_count = 0
-            current_path = [] # Trash the blocked path
+            current_path = [] 
             continue
 
-        # --- LOG AND EXECUTE THE MOVE ---
         print(f"[MOVE] Forward 1 tile: ({current_x}, {current_y}) -> ({next_node[0]}, {next_node[1]})")
         move_forward_tiles(1)
         current_x, current_y = next_node
+        
+        # Add the new tile to our memory bank!
+        historically_visited.add((current_x, current_y)) 
+        
         straight_tiles_count += 1
 
     toggle_camera(True)
@@ -749,10 +759,15 @@ def detect_final_wall_color():
 # 9. GLOBAL STATE & MAIN
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# 9. GLOBAL STATE & MAIN
+# -----------------------------------------------------------------------------
+
 current_x       = 0
 current_y       = 0
 current_heading = 0   
 known_walls     = set()
+historically_visited = {(0, 0)} # Memory of physically visited tiles
 
 
 def main():
@@ -761,9 +776,13 @@ def main():
     robot.step(timestep_ms)
 
     while not check_wall_ahead():
-        move_forward_tiles(1)
-        current_y += 1
-        scan_and_register_walls()
+            move_forward_tiles(1)
+            current_y += 1
+            
+            # Add initial starting tiles to memory
+            historically_visited.add((current_x, current_y)) 
+            
+            scan_and_register_walls()
 
     adjust_to_wall()
     next_tag_data = None 
