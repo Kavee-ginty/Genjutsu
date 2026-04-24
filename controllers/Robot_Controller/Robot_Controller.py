@@ -1,4 +1,4 @@
-# E-Puck Maze Controller — Turn Logging Edition
+# E-Puck Maze Controller — Continuous Scanning Edition
 import math
 import cv2
 import numpy as np
@@ -18,7 +18,6 @@ wheel_radius = 0.0205
 
 emitter     = robot.getDevice('emitter_2')
 cam         = robot.getDevice('camera')
-gps         = robot.getDevice('gps')
 compass     = robot.getDevice('compass')
 lidar       = robot.getDevice('lidar')
 left_motor  = robot.getDevice('left wheel motor')
@@ -29,28 +28,14 @@ right_ps = right_motor.getPositionSensor()
 left_ps.enable(timestep_ms)
 right_ps.enable(timestep_ms)
 
-gps.enable(timestep_ms)
 compass.enable(timestep_ms)
 
 lidar.enable(timestep_ms)
 lidar.enablePointCloud()
 
-# --- CAMERA STATE MANAGEMENT ---
-cam_is_on = False
+# Enable camera permanently
+cam.enable(timestep_ms)
 processed_tags = set()
-
-def toggle_camera(state):
-    """Turns the camera on/off to save CPU processing."""
-    global cam_is_on
-    if state and not cam_is_on:
-        cam.enable(timestep_ms)
-        cam_is_on = True
-    elif not state and cam_is_on:
-        cam.disable()
-        cam_is_on = False
-
-# Start with camera ON to find the first tag
-toggle_camera(True)
 
 robot.step(timestep_ms)
 robot.step(timestep_ms)
@@ -179,9 +164,7 @@ parameters = cv2.aruco.DetectorParameters()
 detector   = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
 def check_camera_quick():
-    """Checks the camera IF it is currently on. Filters out glitch readings."""
-    if not cam_is_on: return None
-    
+    """Checks the camera continuously. Filters out glitch readings and known tags."""
     robot.step(timestep_ms)
     raw = cam.getImage()
     if not raw: return None
@@ -199,8 +182,8 @@ def check_camera_quick():
         x = (tag_id >> 4) & 0x0F
         y = tag_id & 0x0F
         
-        # Anti-Hallucination: If the coordinate is outside a 12x12 maze, ignore it.
-        if x >= 12 or y >= 12:
+        # Anti-Hallucination: If the coordinate is outside a 16x16 maze, ignore it.
+        if x >= 16 or y >= 16:
             return None
 
         processed_tags.add(tag_id)
@@ -229,10 +212,7 @@ def scan_aruco_tag(scan_distance=0.1):
             })
             
     # 2. Sort to prioritize walls parallel to the X-axis
-    # Headings 0 (+Y) and 2 (-Y) look at walls parallel to X.
-    # By sorting by `target_h % 2`, Headings 0 and 2 yield `0` (moved to the front), 
-    # while Headings 1 and 3 yield `1` (moved to the back).
-    walls_to_check.sort(key=lambda x: x['target_h'] % 2)
+    # walls_to_check.sort(key=lambda x: x['target_h'] % 2)
     
     # 3. Execute the scan in the prioritized order
     for wall in walls_to_check:
@@ -332,12 +312,9 @@ def _snap_heading(tolerance=0.05):
         closest = min(multiples, key=lambda x: abs(normalize_angle(rel_angle - x)))
         offset = normalize_angle(rel_angle - closest)
 
-        # If we are inside the tolerance window, stop the motors and exit!
         if abs(offset) <= tolerance:
             break
 
-        # DYNAMIC STEERING: We update motor direction INSIDE the loop. 
-        # If it overshoots, it instantly reverses the motors to catch itself.
         if offset > 0:
             left_motor.setVelocity(0.8)
             right_motor.setVelocity(-0.8)
@@ -353,7 +330,7 @@ def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
-    target_heading = normalize_angle(cur_h + math.pi / 2) # Original, correct math
+    target_heading = normalize_angle(cur_h + math.pi / 2)
     
     left_motor.setVelocity(-speed)
     right_motor.setVelocity( speed)
@@ -377,7 +354,7 @@ def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
     
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
-    target_heading = normalize_angle(cur_h - math.pi / 2) # Original, correct math
+    target_heading = normalize_angle(cur_h - math.pi / 2)
     
     left_motor.setVelocity( speed)
     right_motor.setVelocity(-speed)
@@ -419,28 +396,7 @@ def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
     if correct:
         robot.step(timestep_ms)
         _snap_heading(tolerance)
-def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    
-    vals           = compass.getValues()
-    cur_h          = math.atan2(vals[0], vals[1])
-    target_heading = normalize_angle(cur_h + math.pi) 
-    
-    left_motor.setVelocity(-speed)
-    right_motor.setVelocity( speed)
-    
-    while True:
-        if robot.step(timestep_ms) == -1: break
-        vals  = compass.getValues()
-        h     = math.atan2(vals[0], vals[1])
-        error = normalize_angle(h - target_heading)
-        if abs(error) < tolerance: break
-        
-    left_motor.setVelocity(0.0)
-    right_motor.setVelocity(0.0)
-    
-    if correct:
-        robot.step(timestep_ms)
-        _snap_heading(tolerance)
+
 def turn_to_heading(target_h, speed=2.0, reason="Unknown"):
     global current_heading
     diff = (target_h - current_heading) % 4
@@ -557,7 +513,7 @@ def check_wall_ahead(threshold=0.18):
 # 7. NAVIGATION
 # -----------------------------------------------------------------------------
 
-def get_shortest_path_bfs(start, target, grid_size=12, restrict_to_visited=False):
+def get_shortest_path_bfs(start, target, grid_size=16, restrict_to_visited=False):
     from collections import deque
     if start == target: return [start]
     queue   = deque([(start, [start])])
@@ -597,29 +553,15 @@ def navigate_to_target(target_x, target_y):
         scan_and_register_walls()
 
         if target_x is None:
-            toggle_camera(True)
-            return True, res
+            return True, None
 
-
-        # --- DYNAMIC COLUMN-BASED CAMERA TRIGGER ---
-        if current_x == target_x:
-            toggle_camera(True)
-            
-            distance_to_tag = abs(target_y - current_y)
-            if distance_to_tag <= 1:
-                res = check_camera_quick()
-                
-                if res:
-                    print(">>> Tag detected in the target column!")
-                    if distance_to_tag == 0:
-                        print(">>> Result: Robot is exactly on the target tile. This is the ACTUAL tag.")
-                    else:
-                        print(f">>> Result: Tag detected safely from {distance_to_tag} tile away.")
-                    
-                    toggle_camera(False)
-                    return True, res
-        else:
-            toggle_camera(False)
+        # --- CONTINUOUS CAMERA SCANNING ---
+        # The camera is always on, and check_camera_quick() filters out known tags.
+        # If it returns data here, it's a completely NEW tag spotted in the distance!
+        res = check_camera_quick()
+        if res:
+            print(f">>> Early Tag detected mid-navigation! (X, Y): ({res[0]}, {res[1]})")
+            return True, res 
 
         # --- SMART PATH CACHING & SAFE BACKTRACKING ---
         recalculate = True
@@ -670,7 +612,7 @@ def navigate_to_target(target_x, target_y):
             current_path = [] 
             continue
 
-        print(f"[MOVE] Forward 1 tile: ({current_x}, {current_y}) -> ({next_node[0]}, {next_node[1]})")
+        
         move_forward_tiles(1)
         current_x, current_y = next_node
         
@@ -679,7 +621,6 @@ def navigate_to_target(target_x, target_y):
         
         straight_tiles_count += 1
 
-    toggle_camera(True)
     print(f"Reached coordinate: ({target_x}, {target_y})")
     return True, None
 
@@ -688,60 +629,49 @@ def navigate_to_target(target_x, target_y):
 # -----------------------------------------------------------------------------
 
 def detect_final_wall_color():
-    print("\n[COLOR SCAN] Starting Final Wall Color Detection...")
-    toggle_camera(True)
+    global current_heading
+    print("\n[COLOR SCAN] Starting Center Pixel Detection...")
     
-    wall_map = get_wall_map()
-    offsets = {'front': 0, 'left': 1, 'right': 3, 'back': 2}
+    offsets = [0, 1, 2, 3] 
     start_heading = current_heading
 
-    for sensor, offset in offsets.items():
-        if wall_map.get(sensor) == "WALL":
-            target_h = (start_heading + offset) % 4
+    for offset in offsets:
+        target_h = (start_heading + offset) % 4
+        turn_to_heading(target_h, speed=6.28, reason=f"Scanning heading {target_h}")
+
+        for _ in range(6):
+            robot.step(timestep_ms)
+
+        raw = cam.getImage()
+        if raw:
+            img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
+            cy, cx = cam.getHeight() // 2, cam.getWidth() // 2
             
-            # Spin to face the wall
-            if target_h != current_heading:
-                turn_to_heading(target_h, speed=6.28, reason=f"Scanning {sensor} wall for Color")
+            pixel = img[cy, cx]
+            b, g, r = int(pixel[0]), int(pixel[1]), int(pixel[2])
+            
+            print(f"[COLOR TEST] Heading {target_h} Center Pixel -> R:{r} G:{g} B:{b}")
 
-            # Wait 4 steps to let the camera focus and render the lighting properly
-            for _ in range(4):
-                robot.step(timestep_ms)
+            if r < 50 and g < 50 and b < 50:
+                return "Black"
 
-            raw = cam.getImage()
-            if raw:
-                img = np.frombuffer(raw, np.uint8).reshape((cam.getHeight(), cam.getWidth(), 4))
-                h, w = img.shape[:2]
-                patch = img[h//2-10:h//2+10, w//2-10:w//2+10]
-                b, g, r, _ = cv2.mean(patch)
+            if r > 180 and g > 180 and b > 180:
+                if abs(r - g) < 15 and abs(g - b) < 15:
+                    continue 
 
-                print(f"[COLOR TEST] {sensor} wall -> R:{r:.1f} G:{g:.1f} B:{b:.1f}")
+            rgb_pixel = np.uint8([[[r, g, b]]])
+            hsv_pixel = cv2.cvtColor(rgb_pixel, cv2.COLOR_RGB2HSV)[0][0]
+            hue, sat, val = hsv_pixel[0], hsv_pixel[1], hsv_pixel[2]
 
-                # 1. Black Check (All channels must be very dark)
-                if r < 60 and g < 60 and b < 60:
-                    toggle_camera(False)
-                    return "Black"
-
-                # 2. Dominant Color Checks 
-                # (The color must be bright, AND significantly higher than the other channels to ignore white/gray)
-                if r > 90 and r > g + 35 and r > b + 35:
-                    toggle_camera(False)
+            if sat > 30: 
+                if hue < 15 or hue > 165:
                     return "Red"
-                    
-                if g > 90 and g > r + 35 and g > b + 35:
-                    toggle_camera(False)
+                elif 40 < hue < 85:
                     return "Green"
-                    
-                if b > 90 and b > r + 35 and b > g + 35:
-                    toggle_camera(False)
+                elif 100 < hue < 145:
                     return "Blue"
 
-    # Turn off camera if we somehow fail
-    toggle_camera(False)
     return "Unknown"
-
-# -----------------------------------------------------------------------------
-# 9. GLOBAL STATE & MAIN
-# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 # 9. GLOBAL STATE & MAIN
@@ -760,13 +690,10 @@ def main():
     robot.step(timestep_ms)
 
     # --- 1. INITIAL SCAN: Check for a tag straight ahead before moving ---
-    toggle_camera(True)
-    # Give Webots 5 steps to render the first frame and lighting properly
     for _ in range(5):
         robot.step(timestep_ms)
         
     next_tag_data = check_camera_quick()
-    toggle_camera(False)
 
     if next_tag_data:
         x, y, tag_id, binary_str = next_tag_data
@@ -777,7 +704,6 @@ def main():
         move_forward_tiles(1)
         current_y += 1
         
-        # Add initial starting tiles to memory
         historically_visited.add((current_x, current_y)) 
         
         scan_and_register_walls()
@@ -790,13 +716,11 @@ def main():
         if next_tag_data is None:
             x, y, tag_id, binary_str = scan_aruco_tag()
         else:
-            # Inject the tag we found at the start (or dynamically on approach)
             x, y, tag_id, binary_str = next_tag_data
             next_tag_data = None 
 
         if tag_id is not None:
             print(f"Valid Tag Found! Decoded (X, Y): ({x}, {y})")
-            toggle_camera(False) 
             
             success, early_tag = navigate_to_target(x, y)
             
