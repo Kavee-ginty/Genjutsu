@@ -15,7 +15,7 @@ timestep = timestep_ms / 1000.0
 
 tile_length  = 0.25
 wheel_radius = 0.0205
-turn_counter = 0
+# turn_counter = 0
 
 emitter     = robot.getDevice('emitter_2')
 cam         = robot.getDevice('camera')
@@ -351,12 +351,12 @@ def _snap_heading(tolerance=0.05):
 
 
 def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] Left 90° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
+    # global turn_counter
+    # # print(f"[TURN] Left 90° | Trigger: {reason}")
+    # turn_counter += 1
+    # if turn_counter >= 5:
+    #     adjust_to_wall()
+    #     turn_counter = 0
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
@@ -381,12 +381,12 @@ def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
     
 
 def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] Right 90° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
+    # global turn_counter
+    # print(f"[TURN] Right 90° | Trigger: {reason}")
+    # turn_counter += 1
+    # if turn_counter >= 5:
+    #     adjust_to_wall()
+    #     turn_counter = 0
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
@@ -411,12 +411,12 @@ def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
 
 
 def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] 180° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
+    # global turn_counter
+    # print(f"[TURN] 180° | Trigger: {reason}")
+    # turn_counter += 1
+    # if turn_counter >= 5:
+    #     adjust_to_wall()
+    #     turn_counter = 0
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
@@ -439,12 +439,12 @@ def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
         robot.step(timestep_ms)
         _snap_heading(tolerance)
 def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] 180° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
+    # global turn_counter
+    # print(f"[TURN] 180° | Trigger: {reason}")
+    # turn_counter += 1
+    # if turn_counter >= 5:
+    #     adjust_to_wall()
+    #     turn_counter = 0
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
@@ -681,7 +681,7 @@ def navigate_to_target(target_x, target_y):
             continue
 
         # --- LOG AND EXECUTE THE MOVE ---
-        print(f"[MOVE] Forward 1 tile: ({current_x}, {current_y}) -> ({next_node[0]}, {next_node[1]})")
+        # print(f"[MOVE] Forward 1 tile: ({current_x}, {current_y}) -> ({next_node[0]}, {next_node[1]})")
         move_forward_tiles(1)
         current_x, current_y = next_node
         straight_tiles_count += 1
