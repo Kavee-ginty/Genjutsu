@@ -15,7 +15,6 @@ timestep = timestep_ms / 1000.0
 
 tile_length  = 0.25
 wheel_radius = 0.0205
-turn_counter = 0
 
 emitter     = robot.getDevice('emitter_2')
 cam         = robot.getDevice('camera')
@@ -210,7 +209,7 @@ def check_camera_quick():
         
     return None
 
-def scan_aruco_tag(scan_distance=0.2):
+def scan_aruco_tag(scan_distance=0.1):
     """
     Intelligent close-range scan: Prioritizes walls parallel to the X-axis.
     """
@@ -351,12 +350,6 @@ def _snap_heading(tolerance=0.05):
 
 
 def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] Left 90° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
         
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
@@ -381,13 +374,7 @@ def turn_left_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
     
 
 def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] Right 90° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
-        
+    
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
     target_heading = normalize_angle(cur_h - math.pi / 2) # Original, correct math
@@ -411,13 +398,7 @@ def turn_right_90(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
 
 
 def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] 180° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
-        
+    
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
     target_heading = normalize_angle(cur_h + math.pi) 
@@ -439,13 +420,7 @@ def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
         robot.step(timestep_ms)
         _snap_heading(tolerance)
 def turn_180(correct=True, tolerance=0.05, speed=2.0, reason="Unknown"):
-    global turn_counter
-    print(f"[TURN] 180° | Trigger: {reason}")
-    turn_counter += 1
-    if turn_counter >= 5:
-        adjust_to_wall()
-        turn_counter = 0
-        
+    
     vals           = compass.getValues()
     cur_h          = math.atan2(vals[0], vals[1])
     target_heading = normalize_angle(cur_h + math.pi) 
@@ -616,10 +591,15 @@ def get_target_heading(current_node, next_node):
 def navigate_to_target(target_x, target_y):
     global current_x, current_y, current_heading
     straight_tiles_count = 0
-    current_path = [] # Gives the robot memory of its planned route
+    current_path = [] 
 
     while (current_x, current_y) != (target_x, target_y):
         scan_and_register_walls()
+
+        if target_x is None:
+            toggle_camera(True)
+            return True, res
+
 
         # --- DYNAMIC COLUMN-BASED CAMERA TRIGGER ---
         if current_x == target_x:
@@ -641,7 +621,6 @@ def navigate_to_target(target_x, target_y):
         else:
             toggle_camera(False)
 
-        # --- SMART PATH CACHING ---
         # --- SMART PATH CACHING & SAFE BACKTRACKING ---
         recalculate = True
         
@@ -660,13 +639,17 @@ def navigate_to_target(target_x, target_y):
                         recalculate = False
 
         if recalculate:
-            # 1. Try Safe Backtracking First
-            if (target_x, target_y) in historically_visited:
-                current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y), restrict_to_visited=True)
+            new_path = None
             
-            # 2. If it's an unknown target (or if the restricted path fails), use normal BFS
-            if not current_path or len(current_path) < 2:
-                current_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+            # 1. Try Safe Backtracking ONLY if the exact target is in our history
+            if (target_x, target_y) in historically_visited:
+                new_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y), restrict_to_visited=True)
+            
+            # 2. If it's an unknown target, OR safe backtracking couldn't find a contiguous path, use Normal BFS
+            if not new_path or len(new_path) < 2:
+                new_path = get_shortest_path_bfs((current_x, current_y), (target_x, target_y))
+
+            current_path = new_path
 
             # 3. If still no path, abort
             if not current_path or len(current_path) < 2:
@@ -699,6 +682,7 @@ def navigate_to_target(target_x, target_y):
     toggle_camera(True)
     print(f"Reached coordinate: ({target_x}, {target_y})")
     return True, None
+
 # -----------------------------------------------------------------------------
 # 8. FINAL DETECTION & MESSAGING
 # -----------------------------------------------------------------------------
@@ -775,23 +759,38 @@ def main():
 
     robot.step(timestep_ms)
 
+    # --- 1. INITIAL SCAN: Check for a tag straight ahead before moving ---
+    toggle_camera(True)
+    # Give Webots 5 steps to render the first frame and lighting properly
+    for _ in range(5):
+        robot.step(timestep_ms)
+        
+    next_tag_data = check_camera_quick()
+    toggle_camera(False)
+
+    if next_tag_data:
+        x, y, tag_id, binary_str = next_tag_data
+        print(f">>> Initial Scan: Valid Tag Found straight ahead! Decoded (X, Y): ({x}, {y})")
+
+    # --- 2. ENTER THE MAZE ---
     while not check_wall_ahead():
-            move_forward_tiles(1)
-            current_y += 1
-            
-            # Add initial starting tiles to memory
-            historically_visited.add((current_x, current_y)) 
-            
-            scan_and_register_walls()
+        move_forward_tiles(1)
+        current_y += 1
+        
+        # Add initial starting tiles to memory
+        historically_visited.add((current_x, current_y)) 
+        
+        scan_and_register_walls()
 
     adjust_to_wall()
-    next_tag_data = None 
 
+    # --- 3. MAIN NAVIGATION LOOP ---
     while robot.step(timestep_ms) != -1:
         
         if next_tag_data is None:
             x, y, tag_id, binary_str = scan_aruco_tag()
         else:
+            # Inject the tag we found at the start (or dynamically on approach)
             x, y, tag_id, binary_str = next_tag_data
             next_tag_data = None 
 
