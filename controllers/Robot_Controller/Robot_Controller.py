@@ -1,24 +1,21 @@
-# -----------------------------------------------------------------------------
-# 1. IMPORTS
-# -----------------------------------------------------------------------------
 import math
 import cv2
 import numpy as np
 from controller import Robot
 import collections
 
-# -----------------------------------------------------------------------------
+
 # 2. CONSTANTS
-# -----------------------------------------------------------------------------
+
 tile_length  = 0.25
 wheel_radius = 0.0205
 NEAR_WALL_MAX = 0.20   
 FAR_WALL_MIN  = 0.30   
 FAR_WALL_MAX  = 0.45
 
-# -----------------------------------------------------------------------------
+
 # 3. INITIALIZATION
-# -----------------------------------------------------------------------------
+
 robot = Robot()
 timestep_ms = int(robot.getBasicTimeStep())
 timestep = timestep_ms / 1000.0
@@ -54,9 +51,9 @@ right_motor.setPosition(float('inf'))
 left_motor.setVelocity(0.0)
 right_motor.setVelocity(0.0)
 
-# -----------------------------------------------------------------------------
+
 # 4. GLOBAL STATE
-# -----------------------------------------------------------------------------
+
 current_x       = 0
 current_y       = 0
 current_heading = 0   
@@ -64,9 +61,9 @@ known_walls     = set()
 historically_visited = {(0, 0)} # Memory of physically visited tiles
 perimeter_mode = True  # Tracks whether the outer-wall rule is currently active
 
-# -----------------------------------------------------------------------------
+
 # 5. HELPER UTILITIES
-# -----------------------------------------------------------------------------
+
 def normalize_angle(angle):
     while angle >  math.pi: angle -= 2 * math.pi
     while angle < -math.pi: angle += 2 * math.pi
@@ -107,25 +104,19 @@ def is_dead_end(start_node, target_node, avoid_node, grid_size=12):
 def get_rule_based_next_node(current, target, grid_size=12):
     global perimeter_mode
     
-    # ---------------------------------------------------------
-    # Optimization: Prioritize known territory for visited targets
-    # ---------------------------------------------------------
+    # Prioritize known territory for visited targets
     if target in historically_visited:
         safe_path = get_shortest_path_bfs(current, target, grid_size, restrict_to_visited=True)
         if safe_path and len(safe_path) > 1:
             perimeter_mode = False 
             return safe_path[1]
 
-    # ---------------------------------------------------------
-    # NEW LOGIC: Release perimeter mode if within 3-tile radius
-    # ---------------------------------------------------------
+    # Release perimeter mode if within 3-tile radius
     in_strike_zone = abs(target[0] - current[0]) < 3 and abs(target[1] - current[1]) < 3
     if in_strike_zone:
         perimeter_mode = False
 
-    # ---------------------------------------------------------
     # Core Routing Logic
-    # ---------------------------------------------------------
     if is_on_perimeter(current[0], current[1], grid_size):
         # Only trigger perimeter mode if we are NOT in the strike zone
         if (not perimeter_mode) and (not in_strike_zone):
@@ -141,9 +132,7 @@ def get_rule_based_next_node(current, target, grid_size=12):
         path = get_shortest_path_bfs(current, target, grid_size)
         return path[1] if path and len(path) > 1 else None
         
-    # ---------------------------------------------------------
     # Perimeter Following Logic (Only active if perimeter_mode is True)
-    # ---------------------------------------------------------
     valid_perimeter_moves = []
     for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
         nxt = (current[0] + dx, current[1] + dy)
@@ -167,9 +156,9 @@ def get_rule_based_next_node(current, target, grid_size=12):
     return path[1] if path and len(path) > 1 else None
 
 
-# -----------------------------------------------------------------------------
+
 # 6. LIDAR & WALL SCANNING
-# -----------------------------------------------------------------------------
+
 def get_avg_dist(sector):
     valid = [r for r in sector if r != float('inf') and r > 0]
     return sum(valid) / len(valid) if valid else float('inf')
@@ -242,9 +231,9 @@ def scan_and_register_walls():
         if wall_map.get(near_key) == "OPEN" and wall_map.get(far_key) == "WALL":
             register_if_wall(near_key, 2)
 
-# -----------------------------------------------------------------------------
+
 # 7. ARUCO TAG DETECTION
-# -----------------------------------------------------------------------------
+
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 parameters = cv2.aruco.DetectorParameters()
 detector   = cv2.aruco.ArucoDetector(aruco_dict, parameters)
@@ -299,9 +288,9 @@ def scan_aruco_tag(scan_distance=0.1):
         if res: return res
     return None, None, None, None
 
-# -----------------------------------------------------------------------------
+
 # 8. MOVEMENT PRIMITIVES & DRIFT CORRECTION
-# -----------------------------------------------------------------------------
+
 def get_dynamic_speeds(base_speed):
     vals = compass.getValues()
     cur_h = math.atan2(vals[0], vals[1])
@@ -538,9 +527,9 @@ def check_wall_ahead(threshold=0.18):
     d_front = get_avg_dist(s_front)
     return wall_map['front'] == "WALL" or (not math.isinf(d_front) and d_front < threshold)
 
-# -----------------------------------------------------------------------------
+
 # 9. NAVIGATION
-# -----------------------------------------------------------------------------
+
 def get_shortest_path_bfs(start, target, grid_size=12, restrict_to_visited=False):
     from collections import deque
     if start == target: return [start]
@@ -600,9 +589,9 @@ def navigate_to_target(target_x, target_y):
     print(f"Reached coordinate: ({target_x}, {target_y})")
     return True, None
 
-# -----------------------------------------------------------------------------
+
 # 10. FINAL DETECTION & MESSAGING
-# -----------------------------------------------------------------------------
+
 def detect_final_wall_color():
     global current_heading
     print("\n[COLOR SCAN] Starting Center Pixel Detection...")
@@ -619,7 +608,6 @@ def detect_final_wall_color():
             cy, cx = cam.getHeight() // 2, cam.getWidth() // 2
             pixel = img[cy, cx]
             b, g, r = int(pixel[0]), int(pixel[1]), int(pixel[2])
-            # print(f"[COLOR TEST] Heading {target_h} Center Pixel -> R:{r} G:{g} B:{b}")
             if r < 50 and g < 50 and b < 50:
                 return "Black"
             if r > 180 and g > 180 and b > 180:
@@ -637,9 +625,9 @@ def detect_final_wall_color():
                     return "Blue"
     return "Unknown"
 
-# -----------------------------------------------------------------------------
+
 # 11. MAIN
-# -----------------------------------------------------------------------------
+
 def main():
     global current_x, current_y
     robot.step(timestep_ms)
