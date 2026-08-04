@@ -4,8 +4,6 @@ Welcome competitors! In this stage of the competition, your e-puck must autonomo
 
 Computer vision is a core pillar of modern robotics. This document provides the exact technical specifications of the arena so that your vision algorithms can successfully interact with the simulated world.
 
-## 📷 1. Arena Vision Specifications (CRITICAL)
-If your computer vision pipeline is not configured to these exact parameters, your robot will be completely blind to the tags in the arena.
 
 * **Target Dictionary:** `cv2.aruco.DICT_4X4_250`
   * *Note: The tags use a 4x4 grid and the IDs range from 0 to 249. If you initialize your detector with the wrong dictionary, it will return zero results.*
